@@ -83,18 +83,45 @@ class ZohoBooksClient:
         data = await self._request("GET", "/bills", params=params)
         return data.get("bills", [])
 
+    async def get_vendor_by_gstin(self, gstin: str) -> Optional[Dict[str, Any]]:
+        """Look up a vendor by their GSTIN."""
+        params = {"gst_no": gstin, "contact_type": "vendor"}
+        data = await self._request("GET", "/contacts", params=params)
+        contacts = data.get("contacts", [])
+        return contacts[0] if contacts else None
+
     async def create_bill(self, bill_request: BillCreateRequest) -> Dict[str, Any]:
         """Create a new bill."""
+        vendor_id = bill_request.vendor_id
+        
+        # If vendor_id isn't provided, try to resolve it from the gstin
+        if not vendor_id:
+            if not bill_request.gstin:
+                raise ValueError("Either vendor_id or gstin must be provided.")
+            vendor = await self.get_vendor_by_gstin(bill_request.gstin)
+            if not vendor:
+                raise ValueError(f"No vendor found with GSTIN: {bill_request.gstin}")
+            vendor_id = vendor.get("contact_id")
+
         line_items = []
         for item in bill_request.line_items:
-            line_items.append({
+            line_payload = {
                 "item_id": item.item_id,
                 "rate": item.rate,
                 "quantity": item.quantity
-            })
+            }
+            if item.tax_id:
+                line_payload["tax_id"] = item.tax_id
+            elif item.tax_exemption_code:
+                line_payload["tax_exemption_code"] = item.tax_exemption_code
+            else:
+                # Zoho Books India Edition usually requires this if no tax is set
+                line_payload["tax_exemption_code"] = "NON-GST"
+                
+            line_items.append(line_payload)
             
         payload = {
-            "vendor_id": bill_request.vendor_id,
+            "vendor_id": vendor_id,
             "date": bill_request.date,
             "line_items": line_items,
         }

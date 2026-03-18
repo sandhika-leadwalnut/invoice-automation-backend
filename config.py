@@ -8,6 +8,7 @@ class Settings(BaseSettings):
     zoho_domain: str = "https://accounts.zoho.com"
     api_domain: str = "https://www.zohoapis.in"
     organization_id: str = ""
+    default_item_id: str = ""
     
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 

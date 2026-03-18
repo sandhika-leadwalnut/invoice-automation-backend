@@ -5,7 +5,7 @@ import logging
 from config import settings
 from token_service import token_service
 from zoho_client import zoho_books_client
-from schemas import BillCreateRequest
+from schemas import IncomingBillPayload
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -61,12 +61,20 @@ async def list_bills(page: int = 1, per_page: int = 200):
             detail=str(e)
         )
 
-@app.post("/bills", response_model=Dict[str, Any], status_code=status.HTTP_201_CREATED)
-async def create_new_bill(bill: BillCreateRequest):
-    """Create a new bill in Zoho Books."""
+@app.post("/bills", status_code=status.HTTP_201_CREATED)
+async def create_new_bill(payload: List[IncomingBillPayload] | IncomingBillPayload):
+    """Create a new bill (or bills) in Zoho Books from webhook payload."""
     try:
-        created_bill = await zoho_books_client.create_bill(bill)
-        return created_bill
+        bills_to_process = payload if isinstance(payload, list) else [payload]
+        results = []
+        for bill in bills_to_process:
+            created_bill = await zoho_books_client.create_bill(bill)
+            results.append(created_bill)
+        
+        # If a single object was sent, return a single object response
+        if not isinstance(payload, list):
+            return results[0]
+        return results
     except Exception as e:
         logger.error(f"Error creating bill: {e}")
         raise HTTPException(

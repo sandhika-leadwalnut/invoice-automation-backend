@@ -3,7 +3,7 @@ import logging
 from typing import Dict, Any, List, Optional
 from config import settings
 from token_service import token_service
-from schemas import BillCreateRequest
+from schemas import IncomingBillPayload
 
 logger = logging.getLogger(__name__)
 
@@ -90,26 +90,28 @@ class ZohoBooksClient:
         contacts = data.get("contacts", [])
         return contacts[0] if contacts else None
 
-    async def create_bill(self, bill_request: BillCreateRequest) -> Dict[str, Any]:
+    async def create_bill(self, bill_request: IncomingBillPayload) -> Dict[str, Any]:
         """Create a new bill."""
-        vendor_id = bill_request.vendor_id
-        
-        # If vendor_id isn't provided, try to resolve it from the gstin
-        if not vendor_id:
-            if not bill_request.gstin:
-                raise ValueError("Either vendor_id or gstin must be provided.")
-            vendor = await self.get_vendor_by_gstin(bill_request.gstin)
-            if not vendor:
-                raise ValueError(f"No vendor found with GSTIN: {bill_request.gstin}")
-            vendor_id = vendor.get("contact_id")
+        if not bill_request.vendor_gstin:
+            raise Exception("Cannot create bill: Vendor GSTIN is missing.")
+            
+        vendor = await self.get_vendor_by_gstin(bill_request.vendor_gstin)
+        if not vendor:
+            raise Exception(f"No vendor found with GSTIN: {bill_request.vendor_gstin}")
+            
+        vendor_id = vendor.get("contact_id")
 
         line_items = []
         for item in bill_request.line_items:
             line_payload = {
-                "item_id": item.item_id,
-                "rate": item.rate,
-                "quantity": item.quantity
+                "item_id": settings.default_item_id,
+                "name": item.description,
+                "description": item.description,
+                "rate": item.unit_price,
+                "quantity": item.quantity,
             }
+            if item.hsn_sac:
+                line_payload["hsn_or_sac"] = item.hsn_sac
             if item.tax_id:
                 line_payload["tax_id"] = item.tax_id
             elif item.tax_exemption_code:
@@ -122,18 +124,10 @@ class ZohoBooksClient:
             
         payload = {
             "vendor_id": vendor_id,
-            "date": bill_request.date,
+            "date": bill_request.invoice_date,
+            "bill_number": bill_request.invoice_number,
             "line_items": line_items,
         }
-        
-        if bill_request.reference_number:
-            payload["reference_number"] = bill_request.reference_number
-            
-        if getattr(bill_request, 'bill_number', None):
-            payload["bill_number"] = bill_request.bill_number
-            
-        # Zoho Books automatically calculates the total based on line items, 
-        # but if total is passed, it can be added. Usually let Zoho calculate it.
 
         data = await self._request("POST", "/bills", json_data=payload)
         return data.get("bill", {})

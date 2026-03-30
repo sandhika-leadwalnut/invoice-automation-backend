@@ -16,6 +16,18 @@ app = FastAPI(
     version="1.0.0"
 )
 
+from fastapi.middleware.cors import CORSMiddleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+from verification_router import router as verification_router
+app.include_router(verification_router)
+
 @app.on_event("startup")
 async def startup_event():
     # Attempt to load tokens on startup, but we don't block if they don't exist

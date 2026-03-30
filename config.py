@@ -9,6 +9,7 @@ class Settings(BaseSettings):
     api_domain: str = "https://www.zohoapis.in"
     organization_id: str = ""
     default_item_id: str = ""
+    mongo_uri: str = "mongodb://localhost:27017"
     
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 

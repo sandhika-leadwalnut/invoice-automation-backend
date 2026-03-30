@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/verification", tags=["Verification"])
 
 # MongoDB connection
-client = AsyncIOMotorClient("mongodb://localhost:27017")
+client = AsyncIOMotorClient(settings.mongo_uri)
 db = client["invoice_db"]
 invoices_col = db["invoices"]
 

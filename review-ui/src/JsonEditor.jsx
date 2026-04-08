@@ -4,7 +4,7 @@ import { ChevronRight, ChevronDown } from 'lucide-react';
 const isObject = (val) => val !== null && typeof val === 'object' && !Array.isArray(val);
 const isArray = (val) => Array.isArray(val);
 
-export default function JsonEditor({ data, onChange }) {
+export default function JsonEditor({ data, onChange, zohoItems = [] }) {
     if (!data) return <div className="p-4 text-slate-500">No data available</div>;
 
     const handleChange = (keyPath, newValue) => {
@@ -20,11 +20,11 @@ export default function JsonEditor({ data, onChange }) {
 
     const renderValue = (value, path) => {
         if (isArray(value)) {
-            return <ArrayEditor value={value} path={path} onChange={handleChange} />;
+            return <ArrayEditor value={value} path={path} onChange={handleChange} zohoItems={zohoItems} />;
         } else if (isObject(value)) {
-            return <ObjectEditor value={value} path={path} onChange={handleChange} />;
+            return <ObjectEditor value={value} path={path} onChange={handleChange} zohoItems={zohoItems} />;
         } else {
-            return <PrimitiveEditor value={value} path={path} onChange={handleChange} />;
+            return <PrimitiveEditor value={value} path={path} onChange={handleChange} zohoItems={zohoItems} />;
         }
     };
 
@@ -35,7 +35,7 @@ export default function JsonEditor({ data, onChange }) {
     );
 }
 
-function ObjectEditor({ value, path, onChange }) {
+function ObjectEditor({ value, path, onChange, zohoItems }) {
     const [expanded, setExpanded] = useState(true);
 
     if (!value || Object.keys(value).length === 0) {
@@ -60,7 +60,7 @@ function ObjectEditor({ value, path, onChange }) {
                                 {key}
                             </span>
                             <div className="sm:w-2/3 break-words">
-                                <JsonNode value={val} path={[...path, key]} onChange={onChange} />
+                                <JsonNode value={val} path={[...path, key]} onChange={onChange} zohoItems={zohoItems} />
                             </div>
                         </div>
                     ))}
@@ -70,7 +70,7 @@ function ObjectEditor({ value, path, onChange }) {
     );
 }
 
-function ArrayEditor({ value, path, onChange }) {
+function ArrayEditor({ value, path, onChange, zohoItems }) {
     const [expanded, setExpanded] = useState(true);
 
     if (!value || value.length === 0) {
@@ -92,7 +92,7 @@ function ArrayEditor({ value, path, onChange }) {
                     {value.map((item, index) => (
                         <div key={index} className="bg-slate-50 p-3 rounded border border-slate-100">
                             <div className="text-xs font-bold text-slate-400 mb-2 uppercase">Item {index}</div>
-                            <JsonNode value={item} path={[...path, index]} onChange={onChange} />
+                            <JsonNode value={item} path={[...path, index]} onChange={onChange} zohoItems={zohoItems} />
                         </div>
                     ))}
                 </div>
@@ -101,20 +101,21 @@ function ArrayEditor({ value, path, onChange }) {
     );
 }
 
-function JsonNode({ value, path, onChange }) {
+function JsonNode({ value, path, onChange, zohoItems }) {
     if (isArray(value)) {
-        return <ArrayEditor value={value} path={path} onChange={onChange} />;
+        return <ArrayEditor value={value} path={path} onChange={onChange} zohoItems={zohoItems} />;
     } else if (isObject(value)) {
-        return <ObjectEditor value={value} path={path} onChange={onChange} />;
+        return <ObjectEditor value={value} path={path} onChange={onChange} zohoItems={zohoItems} />;
     } else {
-        return <PrimitiveEditor value={value} path={path} onChange={onChange} />;
+        return <PrimitiveEditor value={value} path={path} onChange={onChange} zohoItems={zohoItems} />;
     }
 }
 
-function PrimitiveEditor({ value, path, onChange }) {
+function PrimitiveEditor({ value, path, onChange, zohoItems }) {
     const isNumber = typeof value === 'number';
     const isBoolean = typeof value === 'boolean';
     const valOrEmpty = value === null || value === undefined ? "" : value;
+    const keyName = path[path.length - 1];
 
     const handleChange = (e) => {
         let newVal = e.target.value;
@@ -122,6 +123,23 @@ function PrimitiveEditor({ value, path, onChange }) {
         if (isBoolean) newVal = e.target.checked;
         onChange(path, newVal);
     };
+
+    if (keyName === 'item_id' && zohoItems && zohoItems.length > 0) {
+        return (
+            <select
+                value={valOrEmpty}
+                onChange={handleChange}
+                className="block w-full shadow-sm sm:text-sm rounded-md px-3 py-2 border border-slate-300 focus:ring-indigo-500 focus:border-indigo-500"
+            >
+                <option value="">-- Default Item / No Item --</option>
+                {zohoItems.map(item => (
+                    <option key={item.item_id} value={item.item_id}>
+                        {item.name} {item.sku ? `(${item.sku})` : ''}
+                    </option>
+                ))}
+            </select>
+        );
+    }
 
     if (isBoolean) {
         return (

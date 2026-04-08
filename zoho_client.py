@@ -104,7 +104,7 @@ class ZohoBooksClient:
         line_items = []
         for item in bill_request.line_items:
             line_payload = {
-                "item_id": settings.default_item_id,
+                "item_id": item.item_id if item.item_id else settings.default_item_id,
                 "name": item.description,
                 "description": item.description,
                 "rate": item.unit_price,

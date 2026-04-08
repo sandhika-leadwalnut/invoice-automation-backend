@@ -9,19 +9,33 @@ export default function Review() {
     const navigate = useNavigate();
     const [invoice, setInvoice] = useState(null);
     const [editedData, setEditedData] = useState(null);
+    const [zohoItems, setZohoItems] = useState([]);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState(null);
 
     useEffect(() => {
-        fetchInvoice();
+        fetchInvoiceData();
     }, [id]);
 
-    const fetchInvoice = async () => {
+    const fetchInvoiceData = async () => {
         try {
-            const response = await axios.get(`http://127.0.0.1:8000/verification/invoice/${id}`);
-            setInvoice(response.data);
+            const [invoiceRes, itemsRes] = await Promise.all([
+                axios.get(`http://127.0.0.1:8000/verification/invoice/${id}`),
+                axios.get(`http://127.0.0.1:8000/items`)
+            ]);
+            setInvoice(invoiceRes.data);
+            setZohoItems(itemsRes.data);
+
             // Initialize edited data with the fetched data
-            setEditedData(JSON.parse(JSON.stringify(response.data.invoice_data)));
+            const initialData = JSON.parse(JSON.stringify(invoiceRes.data.invoice_data));
+            // Ensure item_id exists in line_items so it's editable
+            if (initialData.line_items && Array.isArray(initialData.line_items)) {
+                initialData.line_items = initialData.line_items.map(item => ({
+                    ...item,
+                    item_id: item.item_id || ""
+                }));
+            }
+            setEditedData(initialData);
         } catch (err) {
             console.error(err);
             setError('Failed to fetch invoice data.');
@@ -97,6 +111,7 @@ export default function Review() {
                 <JsonEditor
                     data={editedData}
                     onChange={setEditedData}
+                    zohoItems={zohoItems}
                 />
             </div>
         </div>

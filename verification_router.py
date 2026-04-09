@@ -4,6 +4,7 @@ from datetime import datetime
 import uuid
 from motor.motor_asyncio import AsyncIOMotorClient
 import logging
+import asyncio
 
 from config import settings
 from zoho_client import zoho_books_client
@@ -38,6 +39,22 @@ async def get_pending_invoices():
     """Retrieve all pending invoices for the dashboard."""
     cursor = invoices_col.find({"status": "pending"}).sort("created_at", -1)
     invoices = await cursor.to_list(length=100)
+    
+    async def check_vendor(invoice):
+        gstin = invoice.get("invoice_data", {}).get("vendor_gstin")
+        if not gstin:
+            invoice["vendor_exists"] = False
+            return
+        try:
+            vendor = await zoho_books_client.get_vendor_by_gstin(gstin)
+            invoice["vendor_exists"] = bool(vendor)
+        except Exception as e:
+            logger.error(f"Error checking vendor for GSTIN {gstin}: {e}")
+            invoice["vendor_exists"] = False
+
+    if invoices:
+        await asyncio.gather(*(check_vendor(inv) for inv in invoices))
+        
     return invoices
 
 @router.get("/invoice/{id}")

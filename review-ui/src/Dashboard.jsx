@@ -51,6 +51,11 @@ export default function Dashboard() {
                                         <p className="text-sm font-medium text-indigo-600 truncate">
                                             Invoice ID: {invoice._id}
                                         </p>
+                                        {invoice.vendor_exists === false && (
+                                            <span className="ml-3 inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-red-100 text-red-800">
+                                                Vendor doesn't exist
+                                            </span>
+                                        )}
                                     </div>
                                     <div className="ml-2 flex-shrink-0 flex">
                                         <p className="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-yellow-100 text-yellow-800">

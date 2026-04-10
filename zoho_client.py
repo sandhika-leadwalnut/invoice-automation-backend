@@ -85,10 +85,18 @@ class ZohoBooksClient:
 
     async def get_vendor_by_gstin(self, gstin: str) -> Optional[Dict[str, Any]]:
         """Look up a vendor by their GSTIN."""
+        if not gstin:
+            return None
+            
         params = {"gst_no": gstin, "contact_type": "vendor"}
         data = await self._request("GET", "/contacts", params=params)
         contacts = data.get("contacts", [])
         return contacts[0] if contacts else None
+
+    async def get_bill(self, bill_id: str) -> Optional[Dict[str, Any]]:
+        """Fetch a specific bill by ID."""
+        data = await self._request("GET", f"/bills/{bill_id}")
+        return data.get("bill")
 
     async def create_bill(self, bill_request: IncomingBillPayload) -> Dict[str, Any]:
         """Create a new bill."""

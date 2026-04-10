@@ -94,7 +94,19 @@ async def invoice_action(id: str, action_payload: Dict[str, Any]):
         try:
             bill_payload = IncomingBillPayload(**doc["invoice_data"])
             created_bill = await zoho_books_client.create_bill(bill_payload)
-            return {"status": "accepted", "zoho_bill": created_bill}
+            
+            # Verify bill creation
+            verify_status = "verified"
+            bill_id = created_bill.get("bill_id")
+            if bill_id:
+                verified_bill = await zoho_books_client.get_bill(bill_id)
+                if not verified_bill or verified_bill.get("bill_number") != bill_payload.invoice_number:
+                    verify_status = "mismatch"
+                    logger.warning(f"Verification mismatch for invoice {bill_payload.invoice_number}")
+                else:
+                    logger.info(f"Verification successful: read request from Zoho matches payload for invoice {bill_payload.invoice_number}")
+                    
+            return {"status": "accepted", "zoho_bill": created_bill, "verification_status": verify_status}
         except Exception as e:
             logger.error(f"Error pushing to zoho on accept: {str(e)}")
             raise HTTPException(status_code=500, detail=str(e))
@@ -117,7 +129,19 @@ async def invoice_action(id: str, action_payload: Dict[str, Any]):
         try:
             bill_payload = IncomingBillPayload(**edited_data)
             created_bill = await zoho_books_client.create_bill(bill_payload)
-            return {"status": "edited", "zoho_bill": created_bill}
+            
+            # Verify bill creation
+            verify_status = "verified"
+            bill_id = created_bill.get("bill_id")
+            if bill_id:
+                verified_bill = await zoho_books_client.get_bill(bill_id)
+                if not verified_bill or verified_bill.get("bill_number") != bill_payload.invoice_number:
+                    verify_status = "mismatch"
+                    logger.warning(f"Verification mismatch for invoice {bill_payload.invoice_number}")
+                else:
+                    logger.info(f"Verification successful: read request from Zoho matches payload for invoice {bill_payload.invoice_number}")
+
+            return {"status": "edited", "zoho_bill": created_bill, "verification_status": verify_status}
         except Exception as e:
             logger.error(f"Error pushing to zoho on edit: {str(e)}")
             raise HTTPException(status_code=500, detail=str(e))

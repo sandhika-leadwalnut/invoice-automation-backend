@@ -10,6 +10,7 @@ class Settings(BaseSettings):
     organization_id: str = ""
     default_item_id: str = ""
     mongo_uri: str = "mongodb://localhost:27017"
+    gdrive_link: str = ""
     
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 

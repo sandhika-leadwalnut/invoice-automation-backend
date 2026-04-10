@@ -140,4 +140,10 @@ class ZohoBooksClient:
         data = await self._request("POST", "/bills", json_data=payload)
         return data.get("bill", {})
 
+    async def add_bill_comment(self, bill_id: str, description: str) -> Dict[str, Any]:
+        """Add a comment to a bill."""
+        payload = {"description": description}
+        data = await self._request("POST", f"/bills/{bill_id}/comments", json_data=payload)
+        return data.get("comment", {})
+
 zoho_books_client = ZohoBooksClient()

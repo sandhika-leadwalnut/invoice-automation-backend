@@ -99,6 +99,14 @@ async def invoice_action(id: str, action_payload: Dict[str, Any]):
             verify_status = "verified"
             bill_id = created_bill.get("bill_id")
             if bill_id:
+                logger.info(f"Triggering comment addition. GDrive link configured: '{settings.gdrive_link}'")
+                if settings.gdrive_link:
+                    try:
+                        comment_text = f"This invoice is available at this path: {settings.gdrive_link}"
+                        await zoho_books_client.add_bill_comment(bill_id, comment_text)
+                    except Exception as ce:
+                        logger.warning(f"Failed to add comment to bill {bill_id}: {ce}")
+                        
                 verified_bill = await zoho_books_client.get_bill(bill_id)
                 if not verified_bill or verified_bill.get("bill_number") != bill_payload.invoice_number:
                     verify_status = "mismatch"
@@ -134,6 +142,14 @@ async def invoice_action(id: str, action_payload: Dict[str, Any]):
             verify_status = "verified"
             bill_id = created_bill.get("bill_id")
             if bill_id:
+                logger.info(f"Triggering comment addition (edit). GDrive link configured: '{settings.gdrive_link}'")
+                if settings.gdrive_link:
+                    try:
+                        comment_text = f"This invoice is available at this path: {settings.gdrive_link}"
+                        await zoho_books_client.add_bill_comment(bill_id, comment_text)
+                    except Exception as ce:
+                        logger.warning(f"Failed to add comment to bill {bill_id}: {ce}")
+                        
                 verified_bill = await zoho_books_client.get_bill(bill_id)
                 if not verified_bill or verified_bill.get("bill_number") != bill_payload.invoice_number:
                     verify_status = "mismatch"

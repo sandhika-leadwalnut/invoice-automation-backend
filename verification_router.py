@@ -114,6 +114,11 @@ async def invoice_action(id: str, action_payload: Dict[str, Any]):
                 else:
                     logger.info(f"Verification successful: read request from Zoho matches payload for invoice {bill_payload.invoice_number}")
                     
+            await invoices_col.update_one(
+                {"_id": id},
+                {"$unset": {"invoice_data": "", "edited_data": ""}}
+            )
+            
             return {"status": "accepted", "zoho_bill": created_bill, "verification_status": verify_status}
         except Exception as e:
             logger.error(f"Error pushing to zoho on accept: {str(e)}")
@@ -156,6 +161,11 @@ async def invoice_action(id: str, action_payload: Dict[str, Any]):
                     logger.warning(f"Verification mismatch for invoice {bill_payload.invoice_number}")
                 else:
                     logger.info(f"Verification successful: read request from Zoho matches payload for invoice {bill_payload.invoice_number}")
+
+            await invoices_col.update_one(
+                {"_id": id},
+                {"$unset": {"invoice_data": "", "edited_data": ""}}
+            )
 
             return {"status": "edited", "zoho_bill": created_bill, "verification_status": verify_status}
         except Exception as e:

@@ -1,5 +1,5 @@
-from fastapi import APIRouter, HTTPException, BackgroundTasks, status
-from typing import Dict, Any, List
+from fastapi import APIRouter, HTTPException, BackgroundTasks, status, Query
+from typing import Dict, Any, List, Optional
 from datetime import datetime
 import uuid
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -25,6 +25,7 @@ async def ingest_invoice(payload: Dict[str, Any]):
     invoice_id = str(uuid.uuid4())
     doc = {
         "_id": invoice_id,
+        "vendor_name": payload.get("vendor_name"),
         "invoice_data": payload,
         "status": "pending",
         "edited_data": None,
@@ -33,6 +34,72 @@ async def ingest_invoice(payload: Dict[str, Any]):
     }
     await invoices_col.insert_one(doc)
     return {"id": invoice_id, "status": "pending"}
+
+@router.get("/metrics")
+async def get_metrics(
+    start_date: Optional[str] = Query(None),
+    end_date: Optional[str] = Query(None),
+    vendor_name: Optional[str] = Query(None)
+):
+    """Retrieve metrics for the dashboard."""
+    query = {}
+    
+    if start_date or end_date:
+        date_query = {}
+        if start_date:
+            try:
+                date_query["$gte"] = datetime.fromisoformat(start_date.replace("Z", "+00:00"))
+            except ValueError:
+                pass
+        if end_date:
+            try:
+                date_query["$lte"] = datetime.fromisoformat(end_date.replace("Z", "+00:00"))
+            except ValueError:
+                pass
+        if date_query:
+            query["created_at"] = date_query
+            
+    if vendor_name:
+        query["vendor_name"] = vendor_name
+        
+    pipeline = [
+        {"$match": query},
+        {"$group": {
+            "_id": "$status",
+            "count": {"$sum": 1}
+        }}
+    ]
+    status_counts = await invoices_col.aggregate(pipeline).to_list(None)
+    
+    total_processed = sum(item["count"] for item in status_counts)
+    
+    vendor_pipeline = [
+        {"$match": query},
+        {"$group": {
+            "_id": "$vendor_name",
+            "count": {"$sum": 1}
+        }},
+        {"$sort": {"count": -1}}
+    ]
+    vendor_counts = await invoices_col.aggregate(vendor_pipeline).to_list(None)
+    
+    timeline_pipeline = [
+        {"$match": query},
+        {"$group": {
+            "_id": {"$dateToString": {"format": "%Y-%m-%d", "date": "$created_at"}},
+            "count": {"$sum": 1}
+        }},
+        {"$sort": {"_id": 1}}
+    ]
+    timeline_counts = await invoices_col.aggregate(timeline_pipeline).to_list(None)
+    
+    return {
+        "status_distribution": {item["_id"]: item["count"] for item in status_counts},
+        "total": total_processed,
+        "vendors": [{"vendor": item["_id"] or "Unknown", "count": item["count"]} for item in vendor_counts],
+        "timeline": [{"date": item["_id"], "count": item["count"]} for item in timeline_counts]
+    }
+
 
 @router.get("/invoices/pending")
 async def get_pending_invoices():

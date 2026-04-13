@@ -1,11 +1,11 @@
 import React, { useEffect, useState } from 'react';
 import axios from 'axios';
-import { Link } from 'react-router-dom';
-import { FileStack } from 'lucide-react';
+import { Link, useNavigate } from 'react-router-dom';
 
 export default function Dashboard() {
     const [invoices, setInvoices] = useState([]);
     const [loading, setLoading] = useState(true);
+    const navigate = useNavigate();
 
     useEffect(() => {
         fetchInvoices();
@@ -38,41 +38,74 @@ export default function Dashboard() {
                     Review these invoices before they are pushed to Zoho Books.
                 </p>
             </div>
-            <ul className="divide-y divide-slate-200">
-                {invoices.length === 0 ? (
-                    <li className="px-4 py-12 text-center text-slate-500">No pending invoices</li>
-                ) : (
-                    invoices.map((invoice) => (
-                        <li key={invoice._id}>
-                            <Link to={`/review/${invoice._id}`} className="block hover:bg-slate-50 transition">
-                                <div className="px-4 py-4 sm:px-6 flex items-center justify-between">
-                                    <div className="flex items-center">
-                                        <FileStack className="h-6 w-6 text-indigo-400 mr-3" />
-                                        <p className="text-sm font-medium text-indigo-600 truncate">
-                                            Invoice ID: {invoice._id}
-                                        </p>
-                                        {invoice.vendor_exists === false && (
-                                            <span className="ml-3 inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-red-100 text-red-800">
-                                                Vendor doesn't exist
+            <div className="overflow-x-auto">
+                <table className="min-w-full divide-y divide-slate-200">
+                    <thead className="bg-slate-50">
+                        <tr>
+                            <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-slate-500 uppercase tracking-wider">
+                                Sl_No
+                            </th>
+                            <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-slate-500 uppercase tracking-wider">
+                                Invoice_ID
+                            </th>
+                            <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-slate-500 uppercase tracking-wider">
+                                Vendor_Name
+                            </th>
+                            <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-slate-500 uppercase tracking-wider">
+                                Process_status
+                            </th>
+                            <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-slate-500 uppercase tracking-wider">
+                                Remarks
+                            </th>
+                        </tr>
+                    </thead>
+                    <tbody className="bg-white divide-y divide-slate-200">
+                        {invoices.length === 0 ? (
+                            <tr>
+                                <td colSpan="5" className="px-6 py-12 text-center text-slate-500">
+                                    No pending invoices
+                                </td>
+                            </tr>
+                        ) : (
+                            invoices.map((invoice, index) => {
+                                const vendorName = invoice.invoice_data?.vendor_name;
+                                const vendorExists = invoice.vendor_exists;
+                                const showMissingVendorWarning = !vendorName || vendorExists === false;
+
+                                return (
+                                    <tr
+                                        key={invoice._id}
+                                        onClick={() => navigate(`/review/${invoice._id}`)}
+                                        className="hover:bg-slate-50 cursor-pointer transition"
+                                    >
+                                        <td className="px-6 py-4 whitespace-nowrap text-sm text-slate-500">
+                                            {index + 1}
+                                        </td>
+                                        <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-indigo-600">
+                                            {invoice._id}
+                                        </td>
+                                        <td className="px-6 py-4 whitespace-nowrap text-sm text-slate-900">
+                                            {vendorName || '-'}
+                                        </td>
+                                        <td className="px-6 py-4 whitespace-nowrap text-sm text-slate-500">
+                                            <span className="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-yellow-100 text-yellow-800">
+                                                {invoice.status}
                                             </span>
-                                        )}
-                                    </div>
-                                    <div className="ml-2 flex-shrink-0 flex">
-                                        <p className="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-yellow-100 text-yellow-800">
-                                            {invoice.status}
-                                        </p>
-                                    </div>
-                                </div>
-                                <div className="px-4 pb-4 sm:px-6">
-                                    <p className="text-sm text-slate-500">
-                                        Received at: {new Date(invoice.created_at).toLocaleString()}
-                                    </p>
-                                </div>
-                            </Link>
-                        </li>
-                    ))
-                )}
-            </ul>
+                                        </td>
+                                        <td className="px-6 py-4 whitespace-nowrap text-sm text-slate-500">
+                                            {showMissingVendorWarning ? (
+                                                <span className="text-red-600 font-medium whitespace-break-spaces">
+                                                    vendor doesn't exist
+                                                </span>
+                                            ) : null}
+                                        </td>
+                                    </tr>
+                                );
+                            })
+                        )}
+                    </tbody>
+                </table>
+            </div>
         </div>
     );
 }

@@ -8,7 +8,7 @@ import asyncio
 
 from config import settings
 from zoho_client import zoho_books_client
-from schemas import IncomingBillPayload
+from schemas import IncomingBillPayload, EmailMetricsPayload
 
 logger = logging.getLogger(__name__)
 
@@ -18,6 +18,22 @@ router = APIRouter(prefix="/verification", tags=["Verification"])
 client = AsyncIOMotorClient(settings.mongo_uri)
 db = client["invoice_db"]
 invoices_col = db["invoices"]
+email_metrics_col = db["invoice_email_metrics"]
+
+@router.post("/email_metrics", status_code=status.HTTP_200_OK)
+async def update_email_metrics(payload: List[EmailMetricsPayload] | EmailMetricsPayload):
+    """Update the total count of invoices received by mail."""
+    payload_list = payload if isinstance(payload, list) else [payload]
+    total_added = sum(item.total_invoices_received for item in payload_list if item.metrics_type == "invoice_email_metrics")
+            
+    if total_added > 0:
+        await email_metrics_col.update_one(
+            {"metrics_type": "invoice_email_metrics"},
+            {"$inc": {"total_invoices_received": total_added}},
+            upsert=True
+        )
+        
+    return {"status": "success", "added": total_added}
 
 @router.post("/invoice", status_code=status.HTTP_201_CREATED)
 async def ingest_invoice(payload: Dict[str, Any]):
@@ -93,11 +109,15 @@ async def get_metrics(
     ]
     timeline_counts = await invoices_col.aggregate(timeline_pipeline).to_list(None)
     
+    email_metrics_doc = await email_metrics_col.find_one({"metrics_type": "invoice_email_metrics"})
+    total_email_invoices = email_metrics_doc.get("total_invoices_received", 0) if email_metrics_doc else 0
+    
     return {
         "status_distribution": {item["_id"]: item["count"] for item in status_counts},
         "total": total_processed,
         "vendors": [{"vendor": item["_id"] or "Unknown", "count": item["count"]} for item in vendor_counts],
-        "timeline": [{"date": item["_id"], "count": item["count"]} for item in timeline_counts]
+        "timeline": [{"date": item["_id"], "count": item["count"]} for item in timeline_counts],
+        "total_email_invoices": total_email_invoices
     }
 
 

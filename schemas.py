@@ -27,3 +27,7 @@ class IncomingBillPayload(BaseModel):
     tax_total: float | None = None
     total_amount: float | None = None
     line_items: List[IncomingLineItem]
+
+class EmailMetricsPayload(BaseModel):
+    metrics_type: str
+    total_invoices_received: int

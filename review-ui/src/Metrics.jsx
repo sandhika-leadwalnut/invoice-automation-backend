@@ -113,15 +113,21 @@ export default function Metrics() {
             </div>
 
             {metrics && (
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-                    {/* Summary Card */}
-                    <div className="bg-white p-6 rounded-lg shadow-sm border border-slate-200 flex flex-col items-center justify-center">
-                        <h3 className="text-lg font-medium text-slate-500 mb-2">Total Invoices</h3>
-                        <p className="text-5xl font-bold text-indigo-600">{metrics.total}</p>
+                <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
+                    {/* Summary Cards */}
+                    <div className="flex flex-col gap-6 md:col-span-1">
+                        <div className="bg-white p-6 rounded-lg shadow-sm border border-slate-200 flex flex-col items-center justify-center flex-1">
+                            <h3 className="text-lg font-medium text-slate-500 mb-2 text-center">Total Processed</h3>
+                            <p className="text-5xl font-bold text-indigo-600">{metrics.total}</p>
+                        </div>
+                        <div className="bg-white p-6 rounded-lg shadow-sm border border-slate-200 flex flex-col items-center justify-center flex-1">
+                            <h3 className="text-lg font-medium text-slate-500 mb-2 text-center">Received by Mail</h3>
+                            <p className="text-5xl font-bold text-emerald-600">{metrics.total_email_invoices || 0}</p>
+                        </div>
                     </div>
 
                     {/* Status Pie Chart */}
-                    <div className="bg-white p-6 rounded-lg shadow-sm border border-slate-200 md:col-span-2">
+                    <div className="bg-white p-6 rounded-lg shadow-sm border border-slate-200 md:col-span-3">
                         <h3 className="text-lg font-medium text-slate-800 mb-4">Invoice Processing Status</h3>
                         <div className="h-64">
                             <ResponsiveContainer width="100%" height="100%">
@@ -147,7 +153,7 @@ export default function Metrics() {
                     </div>
 
                     {/* Vendor Bar Chart */}
-                    <div className="bg-white p-6 rounded-lg shadow-sm border border-slate-200 md:col-span-3">
+                    <div className="bg-white p-6 rounded-lg shadow-sm border border-slate-200 md:col-span-4">
                         <h3 className="text-lg font-medium text-slate-800 mb-4">Top Vendors by Volume</h3>
                         <div className="h-80">
                             <ResponsiveContainer width="100%" height="100%">
@@ -166,7 +172,7 @@ export default function Metrics() {
                     </div>
 
                     {/* Timeline Line Chart */}
-                    <div className="bg-white p-6 rounded-lg shadow-sm border border-slate-200 md:col-span-3">
+                    <div className="bg-white p-6 rounded-lg shadow-sm border border-slate-200 md:col-span-4">
                         <h3 className="text-lg font-medium text-slate-800 mb-4">Processed Invoices over Time</h3>
                         <div className="h-80">
                             <ResponsiveContainer width="100%" height="100%">

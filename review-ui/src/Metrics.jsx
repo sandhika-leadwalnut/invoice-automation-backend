@@ -117,12 +117,16 @@ export default function Metrics() {
                     {/* Summary Cards */}
                     <div className="flex flex-col gap-6 md:col-span-1">
                         <div className="bg-white p-6 rounded-lg shadow-sm border border-slate-200 flex flex-col items-center justify-center flex-1">
+                            <h3 className="text-lg font-medium text-slate-500 mb-2 text-center">Received by Mail</h3>
+                            <p className="text-5xl font-bold text-emerald-600">{metrics.total_email_invoices || 0}</p>
+                        </div>
+                        <div className="bg-white p-6 rounded-lg shadow-sm border border-slate-200 flex flex-col items-center justify-center flex-1">
                             <h3 className="text-lg font-medium text-slate-500 mb-2 text-center">Total Processed</h3>
                             <p className="text-5xl font-bold text-indigo-600">{metrics.total}</p>
                         </div>
                         <div className="bg-white p-6 rounded-lg shadow-sm border border-slate-200 flex flex-col items-center justify-center flex-1">
-                            <h3 className="text-lg font-medium text-slate-500 mb-2 text-center">Received by Mail</h3>
-                            <p className="text-5xl font-bold text-emerald-600">{metrics.total_email_invoices || 0}</p>
+                            <h3 className="text-lg font-medium text-slate-500 mb-2 text-center">Pushed to Zoho</h3>
+                            <p className="text-5xl font-bold text-sky-500">{metrics.total_zoho_pushed || 0}</p>
                         </div>
                     </div>
 

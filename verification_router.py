@@ -19,6 +19,7 @@ client = AsyncIOMotorClient(settings.mongo_uri)
 db = client["invoice_db"]
 invoices_col = db["invoices"]
 email_metrics_col = db["invoice_email_metrics"]
+zoho_push_metrics_col = db["zoho_push_metrics"]
 
 @router.post("/email_metrics", status_code=status.HTTP_200_OK)
 async def update_email_metrics(payload: List[EmailMetricsPayload] | EmailMetricsPayload):
@@ -111,13 +112,17 @@ async def get_metrics(
     
     email_metrics_doc = await email_metrics_col.find_one({"metrics_type": "invoice_email_metrics"})
     total_email_invoices = email_metrics_doc.get("total_invoices_received", 0) if email_metrics_doc else 0
+
+    zoho_push_doc = await zoho_push_metrics_col.find_one({"metrics_type": "zoho_push_metrics"})
+    total_zoho_pushed = zoho_push_doc.get("total_pushed", 0) if zoho_push_doc else 0
     
     return {
         "status_distribution": {item["_id"]: item["count"] for item in status_counts},
         "total": total_processed,
         "vendors": [{"vendor": item["_id"] or "Unknown", "count": item["count"]} for item in vendor_counts],
         "timeline": [{"date": item["_id"], "count": item["count"]} for item in timeline_counts],
-        "total_email_invoices": total_email_invoices
+        "total_email_invoices": total_email_invoices,
+        "total_zoho_pushed": total_zoho_pushed
     }
 
 
@@ -186,6 +191,11 @@ async def invoice_action(id: str, action_payload: Dict[str, Any]):
             verify_status = "verified"
             bill_id = created_bill.get("bill_id")
             if bill_id:
+                await zoho_push_metrics_col.update_one(
+                    {"metrics_type": "zoho_push_metrics"},
+                    {"$inc": {"total_pushed": 1}},
+                    upsert=True
+                )
                 logger.info(f"Triggering comment addition. GDrive link configured: '{settings.gdrive_link}'")
                 if settings.gdrive_link:
                     try:
@@ -234,6 +244,11 @@ async def invoice_action(id: str, action_payload: Dict[str, Any]):
             verify_status = "verified"
             bill_id = created_bill.get("bill_id")
             if bill_id:
+                await zoho_push_metrics_col.update_one(
+                    {"metrics_type": "zoho_push_metrics"},
+                    {"$inc": {"total_pushed": 1}},
+                    upsert=True
+                )
                 logger.info(f"Triggering comment addition (edit). GDrive link configured: '{settings.gdrive_link}'")
                 if settings.gdrive_link:
                     try:

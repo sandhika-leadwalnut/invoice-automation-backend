@@ -1,0 +1,11 @@
+venv/
+__pycache__/
+*.pyc
+.git
+.gitignore
+test.out
+CLAUDE.md
+# Note: Same as ingestion service, explicitly ignoring tokens and env var files so they don't get baked. Mount at runtime.
+.env
+tokens.json
+n8n_payload.json

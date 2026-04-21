@@ -40,10 +40,22 @@ async def update_email_metrics(payload: List[EmailMetricsPayload] | EmailMetrics
 async def ingest_invoice(payload: Dict[str, Any]):
     """Ingest a new invoice JSON into MongoDB with 'pending' status."""
     invoice_id = str(uuid.uuid4())
+    
+    vendor_exists = False
+    gstin = payload.get("vendor_gstin")
+    if gstin:
+        try:
+            vendor = await zoho_books_client.get_vendor_by_gstin(gstin)
+            vendor_exists = bool(vendor)
+        except Exception as e:
+            logger.error(f"Error checking vendor for GSTIN {gstin} at ingestion: {e}")
+            vendor_exists = False
+
     doc = {
         "_id": invoice_id,
         "vendor_name": payload.get("vendor_name"),
         "invoice_data": payload,
+        "vendor_exists": vendor_exists,
         "status": "pending",
         "edited_data": None,
         "created_at": datetime.utcnow(),
@@ -131,22 +143,6 @@ async def get_pending_invoices():
     """Retrieve all pending invoices for the dashboard."""
     cursor = invoices_col.find({"status": "pending"}).sort("created_at", -1)
     invoices = await cursor.to_list(length=100)
-    
-    async def check_vendor(invoice):
-        gstin = invoice.get("invoice_data", {}).get("vendor_gstin")
-        if not gstin:
-            invoice["vendor_exists"] = False
-            return
-        try:
-            vendor = await zoho_books_client.get_vendor_by_gstin(gstin)
-            invoice["vendor_exists"] = bool(vendor)
-        except Exception as e:
-            logger.error(f"Error checking vendor for GSTIN {gstin}: {e}")
-            invoice["vendor_exists"] = False
-
-    if invoices:
-        await asyncio.gather(*(check_vendor(inv) for inv in invoices))
-        
     return invoices
 
 @router.get("/invoice/{id}")

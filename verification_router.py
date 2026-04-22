@@ -166,9 +166,13 @@ async def invoice_action(id: str, action_payload: Dict[str, Any]):
         raise HTTPException(status_code=404, detail="Invoice not found")
         
     if action == "reject":
+        remark = action_payload.get("remark")
+        if not remark or not str(remark).strip():
+            raise HTTPException(status_code=400, detail="Remark is mandatory for rejection")
+            
         await invoices_col.update_one(
             {"_id": id}, 
-            {"$set": {"status": "rejected", "updated_at": datetime.utcnow()}}
+            {"$set": {"status": "rejected", "remark": str(remark).strip(), "updated_at": datetime.utcnow()}}
         )
         return {"status": "rejected"}
         

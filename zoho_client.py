@@ -119,7 +119,9 @@ class ZohoBooksClient:
                 "quantity": item.quantity,
             }
             if item.hsn_sac:
-                line_payload["hsn_or_sac"] = item.hsn_sac
+                sanitized_hsn = "".join(filter(str.isdigit, str(item.hsn_sac)))
+                if sanitized_hsn:
+                    line_payload["hsn_or_sac"] = sanitized_hsn[:8]
             if item.tax_id:
                 line_payload["tax_id"] = item.tax_id
             elif item.tax_exemption_code:

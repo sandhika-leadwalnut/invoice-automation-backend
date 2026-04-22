@@ -182,9 +182,10 @@ async def invoice_action(id: str, action_payload: Dict[str, Any]):
             {"$set": {"status": "accepted", "updated_at": datetime.utcnow()}}
         )
         
-        # Push original to Zoho
+        # Push to Zoho using either potentially supplied frontend data or the original source
+        payload_data = action_payload.get("data") or doc["invoice_data"]
         try:
-            bill_payload = IncomingBillPayload(**doc["invoice_data"])
+            bill_payload = IncomingBillPayload(**payload_data)
             created_bill = await zoho_books_client.create_bill(bill_payload)
             
             # Verify bill creation

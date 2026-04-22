@@ -138,11 +138,11 @@ async def get_metrics(
     }
 
 
-@router.get("/invoices/pending")
-async def get_pending_invoices():
-    """Retrieve all pending invoices for the dashboard."""
-    cursor = invoices_col.find({"status": "pending"}).sort("created_at", -1)
-    invoices = await cursor.to_list(length=100)
+@router.get("/invoices/all")
+async def get_all_invoices():
+    """Retrieve all invoices for the dashboard."""
+    cursor = invoices_col.find({}).sort("created_at", -1)
+    invoices = await cursor.to_list(length=1000)
     return invoices
 
 @router.get("/invoice/{id}")

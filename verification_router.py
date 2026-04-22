@@ -183,7 +183,7 @@ async def invoice_action(id: str, action_payload: Dict[str, Any]):
         )
         
         # Push to Zoho using either potentially supplied frontend data or the original source
-        payload_data = action_payload.get("data") or doc["invoice_data"]
+        payload_data = action_payload.get("data") or doc.get("edited_data") or doc.get("invoice_data", {})
         try:
             bill_payload = IncomingBillPayload(**payload_data)
             created_bill = await zoho_books_client.create_bill(bill_payload)
@@ -235,45 +235,8 @@ async def invoice_action(id: str, action_payload: Dict[str, Any]):
                 "updated_at": datetime.utcnow()
             }}
         )
-        
-        # Push edited to Zoho
-        try:
-            bill_payload = IncomingBillPayload(**edited_data)
-            created_bill = await zoho_books_client.create_bill(bill_payload)
-            
-            # Verify bill creation
-            verify_status = "verified"
-            bill_id = created_bill.get("bill_id")
-            if bill_id:
-                await zoho_push_metrics_col.update_one(
-                    {"metrics_type": "zoho_push_metrics"},
-                    {"$inc": {"total_pushed": 1}},
-                    upsert=True
-                )
-                logger.info(f"Triggering comment addition (edit). GDrive link configured: '{settings.gdrive_link}'")
-                if settings.gdrive_link:
-                    try:
-                        comment_text = f"This invoice is available at this path: {settings.gdrive_link}"
-                        await zoho_books_client.add_bill_comment(bill_id, comment_text)
-                    except Exception as ce:
-                        logger.warning(f"Failed to add comment to bill {bill_id}: {ce}")
-                        
-                verified_bill = await zoho_books_client.get_bill(bill_id)
-                if not verified_bill or verified_bill.get("bill_number") != bill_payload.invoice_number:
-                    verify_status = "mismatch"
-                    logger.warning(f"Verification mismatch for invoice {bill_payload.invoice_number}")
-                else:
-                    logger.info(f"Verification successful: read request from Zoho matches payload for invoice {bill_payload.invoice_number}")
 
-            await invoices_col.update_one(
-                {"_id": id},
-                {"$unset": {"invoice_data": "", "edited_data": ""}}
-            )
-
-            return {"status": "edited", "zoho_bill": created_bill, "verification_status": verify_status}
-        except Exception as e:
-            logger.error(f"Error pushing to zoho on edit: {str(e)}")
-            raise HTTPException(status_code=500, detail=str(e))
+        return {"status": "edited"}
             
     else:
         raise HTTPException(status_code=400, detail="Invalid action, must be accept, edit, or reject.")

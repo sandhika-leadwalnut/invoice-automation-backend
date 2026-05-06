@@ -41,6 +41,23 @@ async def ingest_invoice(payload: Dict[str, Any]):
     """Ingest a new invoice JSON into MongoDB with 'pending' status."""
     invoice_id = str(uuid.uuid4())
     
+    # Extract PDF data if present
+    base64_pdf = payload.pop("base64_pdf", None)
+    pdf_filename = payload.pop("pdf_filename", f"{invoice_id}.pdf")
+    pdf_url = None
+    
+    if base64_pdf:
+        import base64
+        import os
+        pdf_path = f"uploads/{invoice_id}.pdf"
+        try:
+            with open(pdf_path, "wb") as f:
+                f.write(base64.b64decode(base64_pdf))
+            # Just store the relative path or construct full URL depending on frontend needs
+            pdf_url = f"/uploads/{invoice_id}.pdf"
+        except Exception as e:
+            logger.error(f"Error saving PDF to local uploads: {e}")
+
     vendor_exists = False
     gstin = payload.get("vendor_gstin")
     if gstin:
@@ -58,11 +75,12 @@ async def ingest_invoice(payload: Dict[str, Any]):
         "vendor_exists": vendor_exists,
         "status": "pending",
         "edited_data": None,
+        "pdf_url": pdf_url,
         "created_at": datetime.utcnow(),
         "updated_at": datetime.utcnow()
     }
     await invoices_col.insert_one(doc)
-    return {"id": invoice_id, "status": "pending"}
+    return {"id": invoice_id, "status": "pending", "pdf_url": pdf_url}
 
 @router.get("/metrics")
 async def get_metrics(

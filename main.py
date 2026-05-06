@@ -17,6 +17,9 @@ app = FastAPI(
 )
 
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+import os
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -24,6 +27,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+os.makedirs("uploads", exist_ok=True)
+app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
 
 from verification_router import router as verification_router
 app.include_router(verification_router)

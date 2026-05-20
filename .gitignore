@@ -3,3 +3,4 @@ __pycache__/
 .env
 tokens.json
 .DS_Store
+uploads

@@ -83,6 +83,18 @@ class ZohoBooksClient:
         data = await self._request("GET", "/bills", params=params)
         return data.get("bills", [])
 
+    async def get_tds_taxes(self) -> List[Dict[str, Any]]:
+        """List all active TDS taxes."""
+        params = {
+            "page": 1,
+            "per_page": 100,
+            "filter_by": "Taxes.All",
+            "is_tds_request": "true",
+            "usestate": "false"
+        }
+        data = await self._request("GET", "/settings/taxes", params=params)
+        return data.get("taxes", [])
+
     async def get_vendor_by_gstin(self, gstin: str) -> Optional[Dict[str, Any]]:
         """Look up a vendor by their GSTIN."""
         if not gstin:
@@ -127,8 +139,10 @@ class ZohoBooksClient:
             elif item.tax_exemption_code:
                 line_payload["tax_exemption_code"] = item.tax_exemption_code
             else:
-                # Zoho Books India Edition usually requires this if no tax is set
                 line_payload["tax_exemption_code"] = "NON-GST"
+                
+            if getattr(bill_request, 'tds_tax_id', None):
+                line_payload["tds_tax_id"] = bill_request.tds_tax_id
                 
             line_items.append(line_payload)
             

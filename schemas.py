@@ -26,6 +26,7 @@ class IncomingBillPayload(BaseModel):
     sgst: float | None = None
     tax_total: float | None = None
     total_amount: float | None = None
+    tds_tax_id: str | None = None
     line_items: List[IncomingLineItem]
 
 class EmailMetricsPayload(BaseModel):

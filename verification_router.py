@@ -258,3 +258,12 @@ async def invoice_action(id: str, action_payload: Dict[str, Any]):
             
     else:
         raise HTTPException(status_code=400, detail="Invalid action, must be accept, edit, or reject.")
+
+@router.delete("/invoice/{id}")
+async def delete_invoice(id: str):
+    """Delete an invoice by ID."""
+    result = await invoices_col.delete_one({"_id": id})
+    if result.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Invoice not found")
+    return {"status": "deleted"}
+

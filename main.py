@@ -79,6 +79,19 @@ async def list_tds_taxes():
             detail=str(e)
         )
 
+@app.get("/taxes", response_model=List[Dict[str, Any]])
+async def list_standard_taxes():
+    """Retrieve a list of standard taxes from Zoho Books."""
+    try:
+        taxes = await zoho_books_client.get_standard_taxes()
+        return taxes
+    except Exception as e:
+        logger.error(f"Error fetching standard taxes: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(e)
+        )
+
 @app.get("/bills", response_model=List[Dict[str, Any]])
 async def list_bills(page: int = 1, per_page: int = 200):
     """Retrieve a list of bills from Zoho Books."""

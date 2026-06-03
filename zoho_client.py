@@ -95,6 +95,18 @@ class ZohoBooksClient:
         data = await self._request("GET", "/settings/taxes", params=params)
         return data.get("taxes", [])
 
+    async def get_standard_taxes(self) -> List[Dict[str, Any]]:
+        """List all standard active taxes (excluding TDS)."""
+        params = {
+            "page": 1,
+            "per_page": 100,
+            "filter_by": "Taxes.Active"
+        }
+        data = await self._request("GET", "/settings/taxes", params=params)
+        # Filter out TDS taxes to only get standard GST/IGST taxes
+        taxes = data.get("taxes", [])
+        return [t for t in taxes if t.get("tax_specific_type") != "tds"]
+
     async def get_vendor_by_gstin(self, gstin: str) -> Optional[Dict[str, Any]]:
         """Look up a vendor by their GSTIN."""
         if not gstin:

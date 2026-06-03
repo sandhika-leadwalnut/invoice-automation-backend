@@ -58,6 +58,11 @@ async def ingest_invoice(payload: Dict[str, Any]):
         except Exception as e:
             logger.error(f"Error saving PDF to local uploads: {e}")
 
+    # Map items_table to line_items if Unstract populated items_table instead
+    if "items_table" in payload and isinstance(payload["items_table"], list) and len(payload["items_table"]) > 0:
+        if not payload.get("line_items") or len(payload.get("line_items", [])) == 0:
+            payload["line_items"] = payload.pop("items_table")
+
     vendor_exists = False
     gstin = payload.get("vendor_gstin")
     if gstin:
@@ -202,6 +207,12 @@ async def invoice_action(id: str, action_payload: Dict[str, Any]):
         
         # Push to Zoho using either potentially supplied frontend data or the original source
         payload_data = action_payload.get("data") or doc.get("edited_data") or doc.get("invoice_data", {})
+        
+        # Fallback to map items_table to line_items if not done yet
+        if "items_table" in payload_data and isinstance(payload_data["items_table"], list) and len(payload_data["items_table"]) > 0:
+            if not payload_data.get("line_items") or len(payload_data.get("line_items", [])) == 0:
+                payload_data["line_items"] = payload_data.pop("items_table")
+                
         try:
             bill_payload = IncomingBillPayload(**payload_data)
             created_bill = await zoho_books_client.create_bill(bill_payload)

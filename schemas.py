@@ -24,6 +24,8 @@ class IncomingBillPayload(BaseModel):
     subtotal: float | None = None
     cgst: float | None = None
     sgst: float | None = None
+    igst: float | None = None
+    tax_type: str | None = None
     tax_total: float | None = None
     total_amount: float | None = None
     tds_tax_id: str | None = None

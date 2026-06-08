@@ -49,14 +49,17 @@ async def ingest_invoice(payload: Dict[str, Any]):
     if base64_pdf:
         import base64
         import os
-        pdf_path = f"uploads/{invoice_id}.pdf"
+        upload_dir = settings.upload_dir
+        os.makedirs(upload_dir, exist_ok=True)
+        pdf_path = os.path.join(upload_dir, f"{invoice_id}.pdf")
         try:
             with open(pdf_path, "wb") as f:
                 f.write(base64.b64decode(base64_pdf))
+            logger.info(f"Saved PDF to full path: {pdf_path}")
             # Just store the relative path or construct full URL depending on frontend needs
             pdf_url = f"/uploads/{invoice_id}.pdf"
         except Exception as e:
-            logger.error(f"Error saving PDF to local uploads: {e}")
+            logger.error(f"Error saving PDF to local uploads at {pdf_path}: {e}")
 
     # Map items_table to line_items if Unstract populated items_table instead
     if "items_table" in payload and isinstance(payload["items_table"], list) and len(payload["items_table"]) > 0:

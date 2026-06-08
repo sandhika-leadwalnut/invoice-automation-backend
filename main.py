@@ -28,8 +28,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-os.makedirs("uploads", exist_ok=True)
-app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
+upload_dir = settings.upload_dir
+os.makedirs(upload_dir, exist_ok=True)
+logger.info(f"Using upload directory: {upload_dir}")
+app.mount("/uploads", StaticFiles(directory=upload_dir), name="uploads")
 
 from verification_router import router as verification_router
 app.include_router(verification_router)

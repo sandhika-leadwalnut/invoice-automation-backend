@@ -12,6 +12,7 @@ class Settings(BaseSettings):
     mongo_uri: str = "mongodb://localhost:27017"
     gdrive_link: str = ""
     tds_item_id: str = ""
+    upload_dir: str = "/app/uploads"
     
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 

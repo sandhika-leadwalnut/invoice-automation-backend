@@ -135,11 +135,18 @@ class ZohoBooksClient:
 
         line_items = []
         for item in bill_request.line_items:
+            rate = item.unit_price
+            if rate is None:
+                if item.amount is not None and item.quantity and item.quantity > 0:
+                    rate = item.amount / item.quantity
+                else:
+                    rate = 0.0
+                    
             line_payload = {
                 "item_id": item.item_id if item.item_id else settings.default_item_id,
                 "name": item.description,
                 "description": item.description,
-                "rate": item.unit_price,
+                "rate": rate,
                 "quantity": item.quantity,
             }
             if item.hsn_sac:

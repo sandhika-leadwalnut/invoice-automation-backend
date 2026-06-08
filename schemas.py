@@ -8,7 +8,7 @@ class IncomingLineItem(BaseModel):
     hsn_sac: str | None = None
     quantity: float
     unit: str | None = None
-    unit_price: float
+    unit_price: float | None = None
     amount: float | None = None
     tax_id: str | None = None
     tax_exemption_code: str | None = None

@@ -66,6 +66,23 @@ async def ingest_invoice(payload: Dict[str, Any]):
         if not payload.get("line_items") or len(payload.get("line_items", [])) == 0:
             payload["line_items"] = payload.pop("items_table")
 
+    if "line_items" in payload and isinstance(payload["line_items"], list):
+        for item in payload["line_items"]:
+            qty = item.get("quantity")
+            try:
+                if qty is None or qty == "" or float(qty) == 0:
+                    item["quantity"] = 1
+            except (ValueError, TypeError):
+                item["quantity"] = 1
+                
+            unit_price = item.get("unit_price")
+            amount = item.get("amount")
+            try:
+                if (unit_price is None or unit_price == "" or float(unit_price) == 0) and amount is not None and amount != "":
+                    item["unit_price"] = float(amount) / float(item["quantity"])
+            except (ValueError, TypeError, ZeroDivisionError):
+                pass
+
     vendor_exists = False
     gstin = payload.get("vendor_gstin")
     if gstin:
@@ -215,6 +232,23 @@ async def invoice_action(id: str, action_payload: Dict[str, Any]):
         if "items_table" in payload_data and isinstance(payload_data["items_table"], list) and len(payload_data["items_table"]) > 0:
             if not payload_data.get("line_items") or len(payload_data.get("line_items", [])) == 0:
                 payload_data["line_items"] = payload_data.pop("items_table")
+                
+        if "line_items" in payload_data and isinstance(payload_data["line_items"], list):
+            for item in payload_data["line_items"]:
+                qty = item.get("quantity")
+                try:
+                    if qty is None or qty == "" or float(qty) == 0:
+                        item["quantity"] = 1
+                except (ValueError, TypeError):
+                    item["quantity"] = 1
+                    
+                unit_price = item.get("unit_price")
+                amount = item.get("amount")
+                try:
+                    if (unit_price is None or unit_price == "" or float(unit_price) == 0) and amount is not None and amount != "":
+                        item["unit_price"] = float(amount) / float(item["quantity"])
+                except (ValueError, TypeError, ZeroDivisionError):
+                    pass
                 
         try:
             bill_payload = IncomingBillPayload(**payload_data)

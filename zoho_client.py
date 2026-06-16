@@ -77,6 +77,12 @@ class ZohoBooksClient:
         data = await self._request("GET", "/items", params=params)
         return data.get("items", [])
 
+    async def get_chartofaccounts(self, page: int = 1, per_page: int = 200) -> List[Dict[str, Any]]:
+        """List all chart of accounts."""
+        params = {"page": page, "per_page": per_page}
+        data = await self._request("GET", "/chartofaccounts", params=params)
+        return data.get("chartofaccounts", [])
+
     async def get_bills(self, page: int = 1, per_page: int = 200) -> List[Dict[str, Any]]:
         """List all bills."""
         params = {"page": page, "per_page": per_page}
@@ -143,12 +149,16 @@ class ZohoBooksClient:
                     rate = 0.0
                     
             line_payload = {
-                "item_id": item.item_id if item.item_id else settings.default_item_id,
                 "name": item.description,
                 "description": item.description,
                 "rate": rate,
                 "quantity": item.quantity,
             }
+            if item.account_id:
+                line_payload["account_id"] = item.account_id
+            else:
+                line_payload["item_id"] = item.item_id if item.item_id else settings.default_item_id
+
             if item.hsn_sac:
                 sanitized_hsn = "".join(filter(str.isdigit, str(item.hsn_sac)))
                 if sanitized_hsn:

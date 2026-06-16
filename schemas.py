@@ -4,6 +4,7 @@ from typing import List, Optional
 class IncomingLineItem(BaseModel):
     item_number: int | None = None
     item_id: str | None = None
+    account_id: str | None = None
     description: str
     hsn_sac: str | None = None
     quantity: float

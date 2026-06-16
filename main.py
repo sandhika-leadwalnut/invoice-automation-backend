@@ -68,6 +68,19 @@ async def list_items(page: int = 1, per_page: int = 200):
             detail=str(e)
         )
 
+@app.get("/chartofaccounts", response_model=List[Dict[str, Any]])
+async def list_chartofaccounts(page: int = 1, per_page: int = 200):
+    """Retrieve a list of chart of accounts from Zoho Books."""
+    try:
+        accounts = await zoho_books_client.get_chartofaccounts(page=page, per_page=per_page)
+        return accounts
+    except Exception as e:
+        logger.error(f"Error fetching chart of accounts: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(e)
+        )
+
 @app.get("/tds-taxes", response_model=List[Dict[str, Any]])
 async def list_tds_taxes():
     """Retrieve a list of active TDS taxes from Zoho Books."""

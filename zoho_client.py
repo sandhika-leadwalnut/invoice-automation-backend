@@ -127,17 +127,30 @@ class ZohoBooksClient:
         """Fetch a specific bill by ID."""
         data = await self._request("GET", f"/bills/{bill_id}")
         return data.get("bill")
+        
+    async def get_contact(self, contact_id: str) -> Optional[Dict[str, Any]]:
+        """Fetch a specific contact by ID."""
+        data = await self._request("GET", f"/contacts/{contact_id}")
+        return data.get("contact")
 
     async def create_bill(self, bill_request: IncomingBillPayload) -> Dict[str, Any]:
         """Create a new bill."""
-        if not bill_request.vendor_gstin:
-            raise Exception("Cannot create bill: Vendor GSTIN is missing.")
+        vendor_id = None
+        
+        if bill_request.zoho_contact_id:
+            vendor_id = bill_request.zoho_contact_id
+        elif bill_request.vendor_gstin:
+            vendor = await self.get_vendor_by_gstin(bill_request.vendor_gstin)
+            if not vendor:
+                raise Exception(f"No vendor found with GSTIN: {bill_request.vendor_gstin}")
+            vendor_id = vendor.get("contact_id")
             
-        vendor = await self.get_vendor_by_gstin(bill_request.vendor_gstin)
-        if not vendor:
-            raise Exception(f"No vendor found with GSTIN: {bill_request.vendor_gstin}")
+        if not vendor_id:
+            raise Exception("Cannot create bill: Vendor ID (zoho_contact_id) or GSTIN is missing.")
             
-        vendor_id = vendor.get("contact_id")
+        contact_data = await self.get_contact(vendor_id)
+        gst_treatment = contact_data.get("gst_treatment") if contact_data else ""
+        is_unregistered = gst_treatment in ["business_unregistered", "business_none"]
 
         line_items = []
         for item in bill_request.line_items:
@@ -167,7 +180,7 @@ class ZohoBooksClient:
                 line_payload["tax_id"] = item.tax_id
             elif item.tax_exemption_code:
                 line_payload["tax_exemption_code"] = item.tax_exemption_code
-            else:
+            elif not is_unregistered:
                 line_payload["tax_exemption_code"] = "NON-GST"
                 
             if getattr(bill_request, 'tds_tax_id', None):

@@ -5,6 +5,7 @@ import uuid
 from motor.motor_asyncio import AsyncIOMotorClient
 import logging
 import asyncio
+import re
 
 from config import settings
 from zoho_client import zoho_books_client
@@ -35,6 +36,71 @@ async def update_email_metrics(payload: List[EmailMetricsPayload] | EmailMetrics
         )
         
     return {"status": "success", "added": total_added}
+
+async def resolve_vendor_zoho_contact(payload: Dict[str, Any]) -> bool:
+    """
+    Tries to find the zoho_contact_id for the given payload using vendor_id, GSTIN, or vendor_name.
+    Modifies payload in-place to add zoho_contact_id, vendor_id, and ledger_id to line items if found.
+    Returns True if vendor is resolved.
+    """
+    vendors_col = db["vendors"]
+    vendor_id = payload.get("vendor_id")
+    gstin = payload.get("vendor_gstin")
+    vendor_name = payload.get("vendor_name")
+    
+    def apply_vendor_data(v_doc):
+        payload["zoho_contact_id"] = v_doc.get("zoho_contact_id")
+        if v_doc.get("vendor_id"):
+            payload["vendor_id"] = v_doc.get("vendor_id")
+            
+        ledger_id = v_doc.get("ledger_id")
+        if ledger_id and "line_items" in payload and isinstance(payload["line_items"], list):
+            for item in payload["line_items"]:
+                if isinstance(item, dict) and not item.get("account_id"):
+                    item["account_id"] = str(ledger_id)
+                    
+    # 1. Match by vendor_id
+    if vendor_id:
+        try:
+            vendor = await vendors_col.find_one({"vendor_id": vendor_id})
+            if vendor and vendor.get("zoho_contact_id"):
+                apply_vendor_data(vendor)
+                return True
+        except Exception as e:
+            logger.error(f"Error checking vendor for vendor_id {vendor_id}: {e}")
+            
+    # 2. Match by GSTIN in DB
+    if gstin:
+        try:
+            vendor = await vendors_col.find_one({"gstin": gstin.strip()})
+            if vendor and vendor.get("zoho_contact_id"):
+                apply_vendor_data(vendor)
+                return True
+        except Exception as e:
+            logger.error(f"Error checking vendor for GSTIN {gstin} in DB: {e}")
+            
+    # 3. Match by vendor_name in DB
+    if vendor_name:
+        try:
+            name_regex = re.compile(f"^{re.escape(vendor_name.strip())}$", re.IGNORECASE)
+            vendor = await vendors_col.find_one({"vendor_name": name_regex})
+            if vendor and vendor.get("zoho_contact_id"):
+                apply_vendor_data(vendor)
+                return True
+        except Exception as e:
+            logger.error(f"Error checking vendor for name {vendor_name} in DB: {e}")
+
+    # 4. Fallback to Zoho API by GSTIN
+    if gstin:
+        try:
+            vendor = await zoho_books_client.get_vendor_by_gstin(gstin)
+            if vendor and vendor.get("contact_id"):
+                payload["zoho_contact_id"] = vendor.get("contact_id")
+                return True
+        except Exception as e:
+            logger.error(f"Error checking vendor for GSTIN {gstin} at Zoho fallback: {e}")
+            
+    return False
 
 @router.post("/invoice", status_code=status.HTTP_201_CREATED)
 async def ingest_invoice(payload: Dict[str, Any]):
@@ -83,15 +149,7 @@ async def ingest_invoice(payload: Dict[str, Any]):
             except (ValueError, TypeError, ZeroDivisionError):
                 pass
 
-    vendor_exists = False
-    gstin = payload.get("vendor_gstin")
-    if gstin:
-        try:
-            vendor = await zoho_books_client.get_vendor_by_gstin(gstin)
-            vendor_exists = bool(vendor)
-        except Exception as e:
-            logger.error(f"Error checking vendor for GSTIN {gstin} at ingestion: {e}")
-            vendor_exists = False
+    vendor_exists = await resolve_vendor_zoho_contact(payload)
 
     doc = {
         "_id": invoice_id,
@@ -251,6 +309,8 @@ async def invoice_action(id: str, action_payload: Dict[str, Any]):
                     pass
                 
         try:
+            await resolve_vendor_zoho_contact(payload_data)
+                    
             bill_payload = IncomingBillPayload(**payload_data)
             created_bill = await zoho_books_client.create_bill(bill_payload)
             

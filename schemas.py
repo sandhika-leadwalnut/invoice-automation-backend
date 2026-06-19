@@ -18,6 +18,8 @@ class IncomingBillPayload(BaseModel):
     invoice_number: str
     invoice_date: str
     vendor_name: str | None = None
+    vendor_id: str | None = None
+    zoho_contact_id: str | None = None
     vendor_gstin: str | None = None
     buyer_name: str | None = None
     buyer_gstin: str | None = None

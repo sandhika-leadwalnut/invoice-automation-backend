@@ -252,6 +252,12 @@ async def get_invoice(id: str):
     doc = await invoices_col.find_one({"_id": id})
     if not doc:
         raise HTTPException(status_code=404, detail="Invoice not found")
+        
+    # Dynamically apply latest vendor/ledger mappings to the payload before returning to UI
+    payload = doc.get("edited_data") or doc.get("invoice_data")
+    if payload:
+        await resolve_vendor_zoho_contact(payload)
+        
     return doc
 
 @router.post("/invoice/{id}/action")

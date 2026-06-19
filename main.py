@@ -56,11 +56,22 @@ async def list_vendors(page: int = 1, per_page: int = 200):
         )
 
 @app.get("/items", response_model=List[Dict[str, Any]])
-async def list_items(page: int = 1, per_page: int = 200):
-    """Retrieve a list of items from Zoho Books."""
+async def list_items():
+    """Retrieve all items from Zoho Books."""
     try:
-        items = await zoho_books_client.get_items(page=page, per_page=per_page)
-        return items
+        all_items = []
+        page = 1
+        while True:
+            params = {"page": page, "per_page": 200}
+            data = await zoho_books_client._request("GET", "/items", params=params)
+            items = data.get("items", [])
+            if not items:
+                break
+            all_items.extend(items)
+            page += 1
+            if page > 10: # safeguard
+                break
+        return all_items
     except Exception as e:
         logger.error(f"Error fetching items: {e}")
         raise HTTPException(
@@ -69,11 +80,22 @@ async def list_items(page: int = 1, per_page: int = 200):
         )
 
 @app.get("/chartofaccounts", response_model=List[Dict[str, Any]])
-async def list_chartofaccounts(page: int = 1, per_page: int = 200):
-    """Retrieve a list of chart of accounts from Zoho Books."""
+async def list_chartofaccounts():
+    """Retrieve all chart of accounts from Zoho Books."""
     try:
-        accounts = await zoho_books_client.get_chartofaccounts(page=page, per_page=per_page)
-        return accounts
+        all_accounts = []
+        page = 1
+        while True:
+            params = {"page": page, "per_page": 200}
+            data = await zoho_books_client._request("GET", "/chartofaccounts", params=params)
+            accounts = data.get("chartofaccounts", [])
+            if not accounts:
+                break
+            all_accounts.extend(accounts)
+            page += 1
+            if page > 10: # safeguard
+                break
+        return all_accounts
     except Exception as e:
         logger.error(f"Error fetching chart of accounts: {e}")
         raise HTTPException(

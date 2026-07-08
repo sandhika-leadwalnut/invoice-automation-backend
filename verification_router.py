@@ -29,11 +29,11 @@ async def update_email_metrics(payload: List[EmailMetricsPayload] | EmailMetrics
     total_added = sum(item.total_invoices_received for item in payload_list if item.metrics_type == "invoice_email_metrics")
             
     if total_added > 0:
-        await email_metrics_col.update_one(
-            {"metrics_type": "invoice_email_metrics"},
-            {"$inc": {"total_invoices_received": total_added}},
-            upsert=True
-        )
+        await email_metrics_col.insert_one({
+            "metrics_type": "invoice_email_metrics",
+            "total_invoices_received": total_added,
+            "created_at": datetime.utcnow()
+        })
         
     return {"status": "success", "added": total_added}
 
@@ -223,11 +223,35 @@ async def get_metrics(
     ]
     timeline_counts = await invoices_col.aggregate(timeline_pipeline).to_list(None)
     
-    email_metrics_doc = await email_metrics_col.find_one({"metrics_type": "invoice_email_metrics"})
-    total_email_invoices = email_metrics_doc.get("total_invoices_received", 0) if email_metrics_doc else 0
+    email_query = {"metrics_type": "invoice_email_metrics"}
+    if "created_at" in query:
+        email_query["created_at"] = query["created_at"]
+        
+    email_pipeline = [
+        {"$match": email_query},
+        {"$group": {
+            "_id": None,
+            "total": {"$sum": "$total_invoices_received"}
+        }}
+    ]
+    email_metrics_res = await email_metrics_col.aggregate(email_pipeline).to_list(None)
+    total_email_invoices = email_metrics_res[0]["total"] if email_metrics_res else 0
 
-    zoho_push_doc = await zoho_push_metrics_col.find_one({"metrics_type": "zoho_push_metrics"})
-    total_zoho_pushed = zoho_push_doc.get("total_pushed", 0) if zoho_push_doc else 0
+    zoho_query = {"metrics_type": "zoho_push_metrics"}
+    if "created_at" in query:
+        zoho_query["created_at"] = query["created_at"]
+    if "vendor_name" in query:
+        zoho_query["vendor_name"] = query["vendor_name"]
+
+    zoho_pipeline = [
+        {"$match": zoho_query},
+        {"$group": {
+            "_id": None,
+            "total": {"$sum": "$total_pushed"}
+        }}
+    ]
+    zoho_metrics_res = await zoho_push_metrics_col.aggregate(zoho_pipeline).to_list(None)
+    total_zoho_pushed = zoho_metrics_res[0]["total"] if zoho_metrics_res else 0
     
     return {
         "status_distribution": {item["_id"]: item["count"] for item in status_counts},
@@ -324,11 +348,13 @@ async def invoice_action(id: str, action_payload: Dict[str, Any]):
             verify_status = "verified"
             bill_id = created_bill.get("bill_id")
             if bill_id:
-                await zoho_push_metrics_col.update_one(
-                    {"metrics_type": "zoho_push_metrics"},
-                    {"$inc": {"total_pushed": 1}},
-                    upsert=True
-                )
+                vendor_name_to_save = payload_data.get("vendor_name") or doc.get("vendor_name")
+                await zoho_push_metrics_col.insert_one({
+                    "metrics_type": "zoho_push_metrics",
+                    "total_pushed": 1,
+                    "vendor_name": vendor_name_to_save,
+                    "created_at": datetime.utcnow()
+                })
                 logger.info(f"Triggering comment addition. GDrive link configured: '{settings.gdrive_link}'")
                 if settings.gdrive_link:
                     try:

@@ -308,11 +308,6 @@ async def invoice_action(id: str, action_payload: Dict[str, Any]):
         return {"status": "rejected"}
         
     elif action == "accept":
-        await invoices_col.update_one(
-            {"_id": id}, 
-            {"$set": {"status": "accepted", "updated_at": datetime.utcnow()}}
-        )
-        
         # Push to Zoho using either potentially supplied frontend data or the original source
         payload_data = action_payload.get("data") or doc.get("edited_data") or doc.get("invoice_data", {})
         
@@ -372,7 +367,10 @@ async def invoice_action(id: str, action_payload: Dict[str, Any]):
                     
             await invoices_col.update_one(
                 {"_id": id},
-                {"$unset": {"invoice_data": "", "edited_data": ""}}
+                {
+                    "$set": {"status": "accepted", "updated_at": datetime.utcnow()},
+                    "$unset": {"invoice_data": "", "edited_data": ""}
+                }
             )
             
             return {"status": "accepted", "zoho_bill": created_bill, "verification_status": verify_status}

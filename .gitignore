@@ -1,6 +1,10 @@
 venv/
+.venv/
 __pycache__/
 .env
 tokens.json
 .DS_Store
 uploads
+
+# Excel/Office lock files
+~$*

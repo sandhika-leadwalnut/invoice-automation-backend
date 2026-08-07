@@ -159,6 +159,11 @@ async def ingest_invoice(payload: Dict[str, Any]):
         "status": "pending",
         "edited_data": None,
         "pdf_url": pdf_url,
+        # pdf_filename was previously popped off the payload and discarded, which
+        # left no way to tie an invoice back to its file in Google Drive.
+        # drive_file_id is the reliable key; the filename is kept as a fallback.
+        "pdf_filename": pdf_filename,
+        "drive_file_id": payload.get("drive_file_id"),
         "created_at": datetime.utcnow(),
         "updated_at": datetime.utcnow()
     }
@@ -283,6 +288,59 @@ async def get_invoice(id: str):
         await resolve_vendor_zoho_contact(payload)
         
     return doc
+
+@router.get("/vendor/lookup")
+async def vendor_lookup(
+    gstin: Optional[str] = Query(None),
+    vendor_name: Optional[str] = Query(None),
+    vendor_id: Optional[str] = Query(None),
+):
+    """
+    Read-only canonical vendor lookup.
+
+    Used by the ingestion service to decide which Google Drive folder an invoice
+    PDF belongs in. Returns the vendor_name exactly as stored in invoice_db.vendors
+    so folder names stay consistent, instead of relying on the raw OCR spelling
+    which varies between documents.
+
+    Never writes. Returns matched=False rather than erroring when nothing is found.
+    """
+    vendors_col = db["vendors"]
+    doc = None
+
+    if vendor_id:
+        doc = await vendors_col.find_one({"vendor_id": vendor_id.strip()})
+    if not doc and gstin:
+        doc = await vendors_col.find_one({"gstin": gstin.strip()})
+    if not doc and vendor_name:
+        name_regex = re.compile(f"^{re.escape(vendor_name.strip())}$", re.IGNORECASE)
+        doc = await vendors_col.find_one({"vendor_name": name_regex})
+
+    if not doc:
+        return {"matched": False, "vendor_name": None, "zoho_contact_id": None}
+
+    return {
+        "matched": True,
+        "vendor_name": doc.get("vendor_name"),
+        "zoho_contact_id": doc.get("zoho_contact_id"),
+        "ledger_id": doc.get("ledger_id"),
+    }
+
+
+@router.get("/vendors/mapped")
+async def vendors_mapped():
+    """
+    Read-only list of every vendor in invoice_db.vendors.
+
+    Used by the Drive migration so it can match filenames against all mapped
+    vendors, not just the ones that happen to appear on an existing invoice.
+    """
+    cursor = db["vendors"].find(
+        {}, {"_id": 0, "vendor_name": 1, "gstin": 1, "vendor_id": 1}
+    )
+    vendors = await cursor.to_list(length=5000)
+    return [v for v in vendors if v.get("vendor_name")]
+
 
 @router.post("/invoice/{id}/action")
 async def invoice_action(id: str, action_payload: Dict[str, Any]):

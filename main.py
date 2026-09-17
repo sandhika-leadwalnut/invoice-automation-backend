@@ -33,7 +33,7 @@ os.makedirs(upload_dir, exist_ok=True)
 logger.info(f"Using upload directory: {upload_dir}")
 app.mount("/uploads", StaticFiles(directory=upload_dir), name="uploads")
 
-from verification_router import router as verification_router
+from verification_router import router as verification_router, ensure_indexes
 app.include_router(verification_router)
 
 @app.on_event("startup")
@@ -41,6 +41,8 @@ async def startup_event():
     # Attempt to load tokens on startup, but we don't block if they don't exist
     # If they are missing, requests will just fail with 500 until auth_setup is run.
     logger.info("Starting up FastAPI application for Zoho Books integration.")
+    # Idempotent - Mongo ignores an index that already exists.
+    await ensure_indexes()
 
 @app.get("/vendors", response_model=List[Dict[str, Any]])
 async def list_vendors(page: int = 1, per_page: int = 200):

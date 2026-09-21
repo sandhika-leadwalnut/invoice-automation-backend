@@ -1,6 +1,6 @@
 from fastapi import APIRouter, HTTPException, BackgroundTasks, status, Query, Response
 from typing import Dict, Any, List, Optional
-from datetime import datetime
+from datetime import datetime, timedelta
 import uuid
 from motor.motor_asyncio import AsyncIOMotorClient
 import logging
@@ -254,6 +254,100 @@ async def _record_duplicate_hit(original: Dict[str, Any], reason: str, pdf_filen
         "original_id": original["_id"],
         "created_at": now,
     })
+
+
+# --- Expected payment date -------------------------------------------------
+#
+# Whether a credit period counts calendar days or working days.
+#
+# Commercially, "Net 30" means 30 CALENDAR days - that is what a vendor agreed
+# to. Counting only working days stretches 30 days into roughly 42 calendar
+# days, which means paying every vendor later than the contract says. The
+# reimbursement service counts working days because that is an internal
+# processing SLA, not a contractual term; the two are not the same thing.
+#
+# Finance has not settled this yet, so it is a single switch rather than an
+# assumption buried in the arithmetic. Change the value, restart, done.
+CREDIT_PERIOD_BASIS = "business"   # "business" | "calendar"
+
+_WEEKEND = (5, 6)  # Saturday, Sunday
+
+
+def _add_credit_period(start, days: int, basis: str = None):
+    """
+    Add a credit period to a date.
+
+    business : count only working days.
+    calendar : add calendar days, then move off a weekend to the next working
+               day so the date is one a bank transfer can actually happen on.
+
+    Public holidays are NOT handled - there is no holiday calendar in this
+    service yet, so a due date can still land on one.
+    """
+    basis = basis or CREDIT_PERIOD_BASIS
+    if basis == "business":
+        current, counted = start, 0
+        while counted < days:
+            current += timedelta(days=1)
+            if current.weekday() not in _WEEKEND:
+                counted += 1
+        return current
+
+    due = start + timedelta(days=days)
+    while due.weekday() in _WEEKEND:
+        due += timedelta(days=1)
+    return due
+
+
+async def _find_vendor_doc(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Fetch the vendor master record, by the same ladder used to resolve Zoho."""
+    vendors_col = db["vendors"]
+    vendor_id = payload.get("vendor_id")
+    if vendor_id:
+        vendor = await vendors_col.find_one({"vendor_id": vendor_id})
+        if vendor:
+            return vendor
+    gstin = payload.get("vendor_gstin")
+    if gstin:
+        vendor = await vendors_col.find_one({"gstin": str(gstin).strip()})
+        if vendor:
+            return vendor
+    return None
+
+
+async def _compute_expected_payment_date(payload: Dict[str, Any]) -> Optional[datetime]:
+    """
+    Due date = the invoice's own date plus that vendor's credit period.
+
+    Deliberately taken from invoice_date, never from when the email arrived or
+    when we happened to process it - the vendor's clock starts at their invoice.
+
+    Returns None when the vendor has no credit_days on record, or the invoice
+    date cannot be read. An empty cell Finance can see and chase is far better
+    than a plausible-looking date derived from a default nobody agreed to.
+    """
+    invoice_date = _parse_invoice_date(payload.get("invoice_date"))
+    if not invoice_date:
+        logger.info("No readable invoice date; expected payment date left unset")
+        return None
+
+    vendor = await _find_vendor_doc(payload)
+    if not vendor or vendor.get("credit_days") is None:
+        logger.info(
+            f"No credit_days for vendor {payload.get('vendor_name')!r}; "
+            f"expected payment date left unset"
+        )
+        return None
+
+    try:
+        credit_days = int(vendor["credit_days"])
+    except (TypeError, ValueError):
+        logger.warning(f"credit_days on vendor {payload.get('vendor_name')!r} is not a number")
+        return None
+
+    due = _add_credit_period(invoice_date, credit_days)
+    # Stored as a BSON date so it sorts and filters properly.
+    return datetime(due.year, due.month, due.day)
 
 
 async def ensure_indexes():
@@ -752,15 +846,44 @@ async def invoice_action(id: str, action_payload: Dict[str, Any]):
                 else:
                     logger.info(f"Verification successful: read request from Zoho matches payload for invoice {bill_payload.invoice_number}")
                     
+            # The invoice payload used to be deleted at this point, which threw
+            # away the invoice number, date and amount the moment a bill was
+            # approved - leaving no way to build a payment sheet, audit what was
+            # sent, or even tell two accepted invoices apart. It is kept now.
+            #
+            # accepted_data is the payload that actually reached Zoho, which can
+            # differ from invoice_data if a human corrected the extraction. The
+            # difference between the two is worth keeping: it shows exactly where
+            # extraction is weak.
+            expected_payment_date = await _compute_expected_payment_date(payload_data)
+
             await invoices_col.update_one(
                 {"_id": id},
                 {
-                    "$set": {"status": "accepted", "updated_at": datetime.utcnow()},
-                    "$unset": {"invoice_data": "", "edited_data": ""}
+                    "$set": {
+                        "status": "accepted",
+                        "updated_at": datetime.utcnow(),
+                        "accepted_data": payload_data,
+                        # Promoted to the top level so the payment sheet and any
+                        # reporting can query them without reaching into a nested
+                        # document.
+                        "invoice_number": payload_data.get("invoice_number"),
+                        "invoice_date": payload_data.get("invoice_date"),
+                        "total_amount": payload_data.get("total_amount"),
+                        "vendor_gstin": payload_data.get("vendor_gstin"),
+                        "zoho_bill_id": bill_id,
+                        "expected_payment_date": expected_payment_date,
+                    }
                 }
             )
-            
-            return {"status": "accepted", "zoho_bill": created_bill, "verification_status": verify_status}
+
+            return {
+                "status": "accepted",
+                "zoho_bill": created_bill,
+                "verification_status": verify_status,
+                "expected_payment_date": expected_payment_date.date().isoformat()
+                if expected_payment_date else None,
+            }
         except Exception as e:
             logger.error(f"Error pushing to zoho on accept: {str(e)}")
             raise HTTPException(status_code=500, detail=str(e))

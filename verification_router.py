@@ -680,6 +680,72 @@ async def get_metrics(
     duplicate_metrics_res = await duplicate_metrics_col.aggregate(duplicate_pipeline).to_list(None)
     total_duplicates_blocked = duplicate_metrics_res[0]["total"] if duplicate_metrics_res else 0
 
+    # --- Money actually paid -------------------------------------------------
+    #
+    # Filtered on paid_at, NOT created_at: "what did we pay in September" means
+    # the month the money went out, not the month the invoice happened to be
+    # ingested. Those are often different months, and using the wrong one
+    # quietly misstates every figure here.
+    #
+    # The amount is taken from the accepted payload first, since that is what
+    # was actually approved and sent to Zoho, falling back to the extracted
+    # values. Invoices accepted before the payload was retained have no amount
+    # anywhere and count as zero - there is nothing left to read.
+    paid_match: Dict[str, Any] = {"status": "paid", **NOT_DELETED}
+    if "created_at" in query:
+        paid_match["paid_at"] = query["created_at"]
+    if "vendor_name" in query:
+        paid_match["vendor_name"] = query["vendor_name"]
+
+    amount_field = {
+        "$convert": {
+            "input": {
+                "$ifNull": [
+                    "$accepted_data.total_amount",
+                    {"$ifNull": ["$total_amount", "$invoice_data.total_amount"]},
+                ]
+            },
+            "to": "double",
+            "onError": 0,
+            "onNull": 0,
+        }
+    }
+
+    paid_totals = await invoices_col.aggregate([
+        {"$match": paid_match},
+        {"$group": {"_id": None, "total": {"$sum": amount_field}, "count": {"$sum": 1}}}
+    ]).to_list(None)
+
+    paid_by_vendor = await invoices_col.aggregate([
+        {"$match": paid_match},
+        {"$group": {
+            "_id": {"$ifNull": ["$vendor_name", "Unknown"]},
+            "total": {"$sum": amount_field},
+            "count": {"$sum": 1}
+        }},
+        {"$sort": {"total": -1}},
+        {"$limit": 10}
+    ]).to_list(None)
+
+    paid_timeline = await invoices_col.aggregate([
+        {"$match": paid_match},
+        {"$group": {
+            "_id": {"$dateToString": {"format": "%Y-%m", "date": "$paid_at"}},
+            "total": {"$sum": amount_field},
+            "count": {"$sum": 1}
+        }},
+        {"$sort": {"_id": 1}}
+    ]).to_list(None)
+
+    # How many paid invoices carry no recoverable amount, so the UI can say so
+    # rather than presenting an understated total as if it were complete.
+    paid_without_amount = await invoices_col.count_documents({
+        **paid_match,
+        "accepted_data.total_amount": {"$exists": False},
+        "total_amount": {"$exists": False},
+        "invoice_data.total_amount": {"$exists": False},
+    })
+
     return {
         "status_distribution": {item["_id"]: item["count"] for item in status_counts},
         "total": total_processed,
@@ -687,7 +753,21 @@ async def get_metrics(
         "timeline": [{"date": item["_id"], "count": item["count"]} for item in timeline_counts],
         "total_email_invoices": total_email_invoices,
         "total_zoho_pushed": total_zoho_pushed,
-        "total_duplicates_blocked": total_duplicates_blocked
+        "total_duplicates_blocked": total_duplicates_blocked,
+        # Invoice value, inclusive of GST. This is what was billed and approved,
+        # not the cash that left the bank - TDS is deducted at payment and is
+        # not tracked in this service, so the two differ by the withheld amount.
+        "total_paid": round(paid_totals[0]["total"], 2) if paid_totals else 0,
+        "paid_count": paid_totals[0]["count"] if paid_totals else 0,
+        "paid_without_amount": paid_without_amount,
+        "paid_by_vendor": [
+            {"vendor": v["_id"], "total": round(v["total"], 2), "count": v["count"]}
+            for v in paid_by_vendor
+        ],
+        "paid_timeline": [
+            {"month": t["_id"], "total": round(t["total"], 2), "count": t["count"]}
+            for t in paid_timeline
+        ],
     }
 
 

@@ -1,6 +1,6 @@
 from fastapi import APIRouter, HTTPException, BackgroundTasks, status, Query, Response
 from typing import Dict, Any, List, Optional
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 import uuid
 from motor.motor_asyncio import AsyncIOMotorClient
 import logging
@@ -299,6 +299,48 @@ def _add_credit_period(start, days: int, basis: str = None):
     return due
 
 
+# Payments go out twice a month, on the 5th and the 20th.
+PAYMENT_CYCLE_DAYS = (5, 20)
+
+# An invoice dated just after a run still joins that run. Finance holds the
+# window open for three days rather than pushing a vendor a fortnight down the
+# line over a day or two, so an invoice dated the 6th is paid on the 5th.
+PAYMENT_CYCLE_GRACE_DAYS = 3
+
+
+def _payment_cycle_dates(around: date):
+    """Every 5th and 20th from the month before `around` to the month after."""
+    dates = []
+    for offset in (-1, 0, 1):
+        index = around.month - 1 + offset
+        year = around.year + index // 12
+        month = index % 12 + 1
+        for day in PAYMENT_CYCLE_DAYS:
+            dates.append(date(year, month, day))
+    return sorted(dates)
+
+
+def _next_payment_cycle(invoice_date: date) -> Optional[date]:
+    """
+    The payment run an invoice with no agreed credit period belongs to.
+
+    Dated within the grace window after a run, it joins that run - the 6th is
+    paid on the 5th. Later than that, it waits for the next one - the 25th is
+    paid on the 5th of the following month.
+
+    The cycle date is used as-is even when it falls on a weekend, matching what
+    the reimbursement portal already does, so both systems name the same day.
+    """
+    cycles = _payment_cycle_dates(invoice_date)
+
+    passed = [c for c in cycles if c <= invoice_date]
+    if passed and (invoice_date - passed[-1]).days <= PAYMENT_CYCLE_GRACE_DAYS:
+        return passed[-1]
+
+    upcoming = [c for c in cycles if c > invoice_date]
+    return upcoming[0] if upcoming else None
+
+
 async def _find_vendor_doc(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """Fetch the vendor master record, by the same ladder used to resolve Zoho."""
     vendors_col = db["vendors"]
@@ -332,20 +374,32 @@ async def _compute_expected_payment_date(payload: Dict[str, Any]) -> Optional[da
         return None
 
     vendor = await _find_vendor_doc(payload)
-    if not vendor or vendor.get("credit_days") is None:
+    raw_credit_days = vendor.get("credit_days") if vendor else None
+
+    credit_days = None
+    if raw_credit_days is not None:
+        try:
+            credit_days = int(raw_credit_days)
+        except (TypeError, ValueError):
+            logger.warning(
+                f"credit_days on vendor {payload.get('vendor_name')!r} is not a number; "
+                f"treating it as immediate"
+            )
+
+    if not credit_days:
+        # No agreed credit period - or zero, which means the same thing - so the
+        # invoice is due on the next payment run rather than on a date of its own.
+        due = _next_payment_cycle(invoice_date)
         logger.info(
-            f"No credit_days for vendor {payload.get('vendor_name')!r}; "
-            f"expected payment date left unset"
+            f"No credit period for vendor {payload.get('vendor_name')!r}; "
+            f"assigned to the {due} payment run"
         )
+    else:
+        due = _add_credit_period(invoice_date, credit_days)
+
+    if not due:
         return None
 
-    try:
-        credit_days = int(vendor["credit_days"])
-    except (TypeError, ValueError):
-        logger.warning(f"credit_days on vendor {payload.get('vendor_name')!r} is not a number")
-        return None
-
-    due = _add_credit_period(invoice_date, credit_days)
     # Stored as a BSON date so it sorts and filters properly.
     return datetime(due.year, due.month, due.day)
 
@@ -535,6 +589,12 @@ async def ingest_invoice(payload: Dict[str, Any], response: Response):
         except Exception as e:
             logger.error(f"Error saving PDF to local uploads at {pdf_path}: {e}")
 
+    # Worked out at ingestion as well as on accept, so a pending invoice already
+    # shows when it will fall due rather than staying blank until someone
+    # approves it. Recomputed on accept in case the date or vendor was corrected
+    # during review.
+    expected_payment_date = await _compute_expected_payment_date(payload)
+
     # A dedupe_key match on its own means same vendor, same invoice number, same
     # financial year - but a different amount or date. That is either a resend
     # we could not confirm or a corrected invoice re-issued under the old
@@ -561,6 +621,18 @@ async def ingest_invoice(payload: Dict[str, Any], response: Response):
         "dedupe_key": dedupe_key,
         "identity_fingerprint": fingerprint,
         "duplicate_of": original["_id"] if is_probable_duplicate else None,
+        "invoice_number": payload.get("invoice_number"),
+        "invoice_date": payload.get("invoice_date"),
+        "total_amount": payload.get("total_amount"),
+        "vendor_gstin": payload.get("vendor_gstin"),
+        # resolve_vendor_zoho_contact has just written these into the payload.
+        # Kept at the top level because they are the only reliable way to tie an
+        # invoice back to its vendor: vendor_id exists for every vendor, while
+        # 42 of 75 have no GSTIN and names differ between invoice and master.
+        # Without this, a later lookup has nothing exact to match on.
+        "vendor_id": payload.get("vendor_id"),
+        "zoho_contact_id": payload.get("zoho_contact_id"),
+        "expected_payment_date": expected_payment_date,
         "created_at": datetime.utcnow(),
         "updated_at": datetime.utcnow()
     }
@@ -951,6 +1023,8 @@ async def invoice_action(id: str, action_payload: Dict[str, Any]):
                         "invoice_date": payload_data.get("invoice_date"),
                         "total_amount": payload_data.get("total_amount"),
                         "vendor_gstin": payload_data.get("vendor_gstin"),
+                        "vendor_id": payload_data.get("vendor_id"),
+                        "zoho_contact_id": payload_data.get("zoho_contact_id"),
                         "zoho_bill_id": bill_id,
                         "expected_payment_date": expected_payment_date,
                     }
@@ -1036,6 +1110,233 @@ async def bulk_delete_invoices(payload: Dict[str, Any]):
         "deleted": result.modified_count,
         "skipped": len(ids) - result.modified_count,
     }
+
+
+# --- Payment sheet ----------------------------------------------------------
+#
+# Deliberately identical in shape to the sheet the reimbursement portal already
+# produces (AdminDashboard.tsx, exportApprovedPaymentSheet): 25 unlabelled
+# columns A-Y in the order the bank's upload expects. Finance feeds both sheets
+# to the same place, so the layout is not ours to improve on.
+PAYMENT_SHEET_COMPANY = "BIZBOOST"
+PAYMENT_SHEET_PRODUCT = "VPAY"
+PAYMENT_SHEET_DEBIT_ACCOUNT = 7411623583
+
+
+def _payment_sheet_row(invoice: Dict[str, Any], vendor: Optional[Dict[str, Any]]) -> List[Any]:
+    bank = (vendor or {}).get("bank_details") or {}
+    bank_name = str(bank.get("bank") or "")
+
+    data = invoice.get("accepted_data") or invoice.get("invoice_data") or {}
+    amount = _norm_amount(
+        data.get("total_amount") if data.get("total_amount") is not None
+        else invoice.get("total_amount")
+    )
+
+    due = invoice.get("expected_payment_date")
+    if isinstance(due, datetime):
+        due_text = due.strftime("%d/%m/%Y")
+    else:
+        fallback = _next_payment_cycle(datetime.utcnow().date())
+        due_text = fallback.strftime("%d/%m/%Y") if fallback else ""
+
+    invoice_number = (
+        invoice.get("invoice_number")
+        or data.get("invoice_number")
+        or str(invoice.get("_id", ""))[:8].upper()
+    )
+
+    row: List[Any] = [""] * 25
+    row[0] = PAYMENT_SHEET_COMPANY
+    row[1] = PAYMENT_SHEET_PRODUCT
+    # Same bank as the company means an internal transfer rather than NEFT.
+    row[2] = "IFT" if "kotak" in bank_name.lower() else "NEFT"
+    row[4] = due_text
+    row[6] = PAYMENT_SHEET_DEBIT_ACCOUNT
+    row[7] = amount if amount is not None else ""
+    row[8] = "M"
+    row[10] = invoice.get("vendor_name") or data.get("vendor_name") or ""
+    row[11] = bank_name
+    row[12] = str(bank.get("ifsc") or "")
+    row[13] = str(bank.get("account_number") or "")
+    row[23] = invoice_number
+    row[24] = invoice_number
+    return row
+
+
+# Legal forms that appear on an invoice but rarely in the vendor master, and
+# never distinguish one vendor from another.
+_LEGAL_FORMS = ("PRIVATELIMITED", "PVTLTD", "PRIVATELTD", "LIMITED", "LLP",
+                "PVT", "LTD", "INC", "CORP", "COMPANY", "OPC")
+
+
+def _norm_vendor_name(value: Any) -> str:
+    """
+    Reduce a vendor name to its distinguishing part.
+
+    "C.R.Sanjay & Co." and "C R Sanjay and Co" are the same firm; so are
+    "Treebo Hospitality Ventures Private Limited" and "TREEBO HOSPITALITY
+    VENTURES PVT LTD". Ampersands become AND, punctuation goes, and trailing
+    legal forms are stripped.
+    """
+    text = re.sub(r"[^A-Z0-9]", "", str(value or "").upper().replace("&", "AND"))
+    changed = True
+    while changed:
+        changed = False
+        for form in _LEGAL_FORMS:
+            if text.endswith(form) and len(text) > len(form) + 4:
+                text = text[: -len(form)]
+                changed = True
+    return text
+
+
+async def _match_vendor_by_name(vendors_col, invoice_name: str) -> Optional[Dict[str, Any]]:
+    """
+    Last-resort vendor match for invoices with no vendor_id or GSTIN left.
+
+    Matches the vendor's own name or any entry in its `aliases` list, after
+    normalising punctuation, case and legal suffixes.
+
+    Deliberately NOT fuzzy. Vendors are recorded under a working name while
+    invoices carry the legal one - "Sumo Technologies" against "SUMO
+    TECHNOLOGIES PVT LTD" - and it is tempting to close that gap by guessing.
+    But the output of this lookup is a bank account number, and a near-miss
+    sends money to the wrong vendor. So the gap is closed by recording the
+    invoice's spelling as an alias, which is a decision someone made once and
+    can check, rather than a similarity score.
+
+    Populate aliases with: python suggest_vendor_aliases.py
+    """
+    target = _norm_vendor_name(invoice_name)
+    if len(target) < 5:
+        return None
+
+    # Only vendors that actually have bank details are candidates: matching one
+    # without them achieves nothing and widens the chance of a wrong hit.
+    candidates = await vendors_col.find(
+        {"bank_details": {"$exists": True}},
+        # aliases MUST be in this projection - without it every vendor looks as
+        # though it has none and the alias list silently does nothing.
+        {"vendor_name": 1, "aliases": 1, "bank_details": 1, "vendor_id": 1},
+    ).to_list(None)
+
+    matches = []
+    for v in candidates:
+        names = [v.get("vendor_name")] + list(v.get("aliases") or [])
+        if any(_norm_vendor_name(n) == target for n in names):
+            matches.append(v)
+
+    # Exactly one or nothing. Two candidates means the alias list is wrong and
+    # needs fixing, not a coin toss over which bank account gets the money.
+    return matches[0] if len(matches) == 1 else None
+
+
+@router.post("/payment-sheet")
+async def payment_sheet(payload: Dict[str, Any]):
+    """
+    Build the bank payment sheet for a set of accepted invoices.
+
+    { "ids": [...] }
+
+    Bank details are read here rather than sent to the browser, so account
+    numbers never leave the server except inside the generated file. Vendors
+    with no bank details on record still get a row - with the bank columns
+    blank - and are named in the X-Missing-Bank-Details response header, so
+    nothing is silently dropped from a payment run.
+    """
+    import io
+    from openpyxl import Workbook
+    from fastapi.responses import StreamingResponse
+
+    ids = payload.get("ids")
+    if not isinstance(ids, list) or not ids:
+        raise HTTPException(status_code=400, detail="'ids' must be a non-empty list")
+
+    invoices = await invoices_col.find(
+        {"_id": {"$in": ids}, "status": {"$in": ["accepted", "paid"]}, **NOT_DELETED}
+    ).to_list(length=len(ids))
+
+    if not invoices:
+        raise HTTPException(
+            status_code=400,
+            detail="None of the selected invoices are accepted, so none can be paid"
+        )
+
+    vendors_col = db["vendors"]
+    rows, missing_bank, no_amount, approximate = [], [], [], []
+    for invoice in invoices:
+        data = invoice.get("accepted_data") or invoice.get("invoice_data") or {}
+
+        # Invoices accepted before the payload was retained had their amount
+        # deleted along with everything else and it cannot be recovered here.
+        # The row is kept with a blank amount so Finance can fill it in from the
+        # PDF, and the count is reported so nobody uploads the sheet assuming
+        # every line is complete.
+        amount = _norm_amount(
+            data.get("total_amount") if data.get("total_amount") is not None
+            else invoice.get("total_amount")
+        )
+        if not amount:
+            no_amount.append(
+                invoice.get("invoice_number")
+                or data.get("invoice_number")
+                or invoice.get("vendor_name")
+                or str(invoice.get("_id", ""))[:8]
+            )
+
+        # Same ladder resolve_vendor_zoho_contact uses, including the fall back
+        # to name. Invoices accepted before the payload was retained have no
+        # vendor_id and no GSTIN left - but they do still carry vendor_name, and
+        # without using it every one of them looks like a vendor with no bank
+        # details on record, which is not what is wrong with them.
+        # Top level first - that is where it is kept from ingestion onward, and
+        # it survives everything. The payload is the fallback for older records.
+        vendor_id = invoice.get("vendor_id") or data.get("vendor_id")
+        gstin = invoice.get("vendor_gstin") or data.get("vendor_gstin")
+        vendor_name = invoice.get("vendor_name") or data.get("vendor_name")
+
+        vendor = None
+        if vendor_id:
+            vendor = await vendors_col.find_one({"vendor_id": vendor_id})
+        if not vendor and gstin:
+            vendor = await vendors_col.find_one({"gstin": str(gstin).strip()})
+        if not vendor and vendor_name:
+            vendor = await _match_vendor_by_name(vendors_col, vendor_name)
+            if vendor:
+                approximate.append(f"{vendor_name} -> {vendor.get('vendor_name')}")
+
+        if not (vendor or {}).get("bank_details"):
+            name = invoice.get("vendor_name") or "Unknown"
+            if name not in missing_bank:
+                missing_bank.append(name)
+
+        rows.append(_payment_sheet_row(invoice, vendor))
+
+
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Vendor and Re-imbursement"
+    for row in rows:
+        sheet.append(row)
+
+    buffer = io.BytesIO()
+    workbook.save(buffer)
+    buffer.seek(0)
+
+    filename = f"Payment_Sheet_{datetime.utcnow().date().isoformat()}.xlsx"
+    return StreamingResponse(
+        buffer,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "X-Missing-Bank-Details": ", ".join(missing_bank),
+            "X-Skipped-No-Amount": str(len(no_amount)),
+            "X-Approximate-Matches": " | ".join(approximate),
+            "X-Row-Count": str(len(rows)),
+            "Access-Control-Expose-Headers":
+                "X-Missing-Bank-Details, X-Skipped-No-Amount, X-Approximate-Matches, X-Row-Count",
+        },
+    )
 
 
 @router.post("/invoices/bulk-mark-paid")

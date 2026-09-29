@@ -8,3 +8,14 @@ uploads
 
 # Excel/Office lock files
 ~$*
+
+# Timestamped workbook backups written by the vendor scripts. The workbook
+# itself is committed; these accumulate on every run and are local safety nets.
+Vendor-Ledgers_backup_*.xlsx
+
+# Regenerated on demand by suggest_vendor_aliases.py - the aliases themselves
+# live in the database, so this file is a working copy, not a record.
+alias_map.csv
+
+# Stale test output
+test.out

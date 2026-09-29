@@ -70,6 +70,33 @@ check("ISO from the database", _parse_invoice_date("2026-09-10"), INVOICE)
 check("dd/mm/yyyy", _parse_invoice_date("10/09/2026"), INVOICE)
 check("dd-mm-yyyy", _parse_invoice_date("10-09-2026"), INVOICE)
 
+print("\n6. Payment cycle for vendors with no credit period")
+from verification_router import _next_payment_cycle  # noqa: E402
+
+check("25th -> 5th of NEXT month (Finance's example)",
+      _next_payment_cycle(D(2026, 9, 25)), D(2026, 10, 5))
+check("6th -> 5th of the SAME month (Finance's example)",
+      _next_payment_cycle(D(2026, 9, 6)), D(2026, 9, 5))
+check("on the 5th itself", _next_payment_cycle(D(2026, 9, 5)), D(2026, 9, 5))
+check("8th is the last day inside the grace window",
+      _next_payment_cycle(D(2026, 9, 8)), D(2026, 9, 5))
+check("9th has missed it, waits for the 20th",
+      _next_payment_cycle(D(2026, 9, 9)), D(2026, 9, 20))
+check("23rd still catches the 20th",
+      _next_payment_cycle(D(2026, 9, 23)), D(2026, 9, 20))
+check("24th has missed it, waits for the 5th",
+      _next_payment_cycle(D(2026, 9, 24)), D(2026, 10, 5))
+check("1st waits for the 5th", _next_payment_cycle(D(2026, 9, 1)), D(2026, 9, 5))
+check("December rolls into January",
+      _next_payment_cycle(D(2026, 12, 25)), D(2027, 1, 5))
+check("22 Dec catches the 20th", _next_payment_cycle(D(2026, 12, 22)), D(2026, 12, 20))
+check("31 Jan -> 5 Feb", _next_payment_cycle(D(2027, 1, 31)), D(2027, 2, 5))
+
+ok = all(_next_payment_cycle(D(2026, 9, d)).day in (5, 20) for d in range(1, 31))
+print(f"  {'PASS' if ok else 'FAIL'}  every day of a month lands on a 5th or a 20th")
+if not ok:
+    failures.append("cycle produced a non-cycle day")
+
 print("\n" + "=" * 58)
 if failures:
     print(f"{len(failures)} FAILED: {failures}")

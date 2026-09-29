@@ -1,15 +1,67 @@
+# What the running service actually needs is small: main.py, config.py,
+# verification_router.py, zoho_client.py, token_service.py, schemas.py and
+# requirements.txt. Everything else here is either mounted at runtime, or is
+# tooling that runs from a laptop against Atlas and has no business in the
+# image.
+
+# --- Mounted at runtime, never baked in ---
+.env
+tokens.json
+
+# --- Build and VCS noise ---
 venv/
 .venv/
 __pycache__/
 *.pyc
 .git
 .gitignore
-test.out
-CLAUDE.md
-~$*
-*.xlsx
+.dockerignore
+
+# --- Documentation ---
+*.md
 docs/
-# Note: Same as ingestion service, explicitly ignoring tokens and env var files so they don't get baked. Mount at runtime.
-.env
-tokens.json
+
+# --- Vendor data. The service reads invoice_db.vendors, not these files. ---
+*.xlsx
+*.csv
+~$*
+
+# --- One-off Zoho dumps, not referenced by any module the app imports ---
+taxes_dump.json
+tds_taxes_dump.json
 n8n_payload.json
+test.out
+
+# --- Deployment ---
+deploy.sh
+
+# --- Vendor and data management. All of these talk to Atlas or Zoho directly
+#     and are run by hand from a laptop; shipping them lets someone exec into
+#     a production container and mutate the vendor master by accident. ---
+add_vendor.py
+add_missing_vendors.py
+check_vendor.py
+copy_vendor_terms.py
+set_vendor_terms.py
+remove_vendor.py
+list_zoho.py
+suggest_vendor_aliases.py
+diagnose_payment_sheet.py
+update_vendors.py
+backfill_payment_dates.py
+reset_duplicate_counters.py
+auth_setup.py
+get_taxes.py
+get_all_taxes.py
+
+# --- Ad-hoc scripts from earlier work ---
+test_get.py
+test_ingest.py
+test_prefs.py
+test_tds.py
+test_tds_real.py
+test_zoho.py
+
+# NOTE: test_duplicates.py and test_payment_date.py are deliberately NOT
+# excluded. deploy.sh runs them inside the container after a deploy to prove
+# the image really contains the code it is supposed to. They need no database.

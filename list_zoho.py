@@ -42,11 +42,33 @@ async def fetch_all(fetcher):
 
 async def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("what", choices=["accounts", "vendors"])
+    ap.add_argument("what", choices=["accounts", "vendors", "account"])
+    ap.add_argument("--id", default=None, help="account: look one up by account_id")
     ap.add_argument("--search", default=None, help="filter by a word in the name")
     ap.add_argument("--missing", action="store_true",
                     help="vendors only: show just those not in invoice_db.vendors")
     args = ap.parse_args()
+
+    if args.what == "account":
+        # get_chartofaccounts only returns active accounts, so an id that does
+        # not appear there is usually one that has since been made inactive.
+        # Fetching it directly says so rather than leaving it a mystery.
+        if not args.id:
+            print("give --id <account_id>")
+            return
+        data = await zoho_books_client._request("GET", f"/chartofaccounts/{args.id}")
+        account = data.get("chartofaccount") or data.get("chart_of_account") or {}
+        if not account:
+            print(f"no account {args.id} - it may have been deleted")
+            return
+        for field in ("account_id", "account_name", "account_type", "is_active",
+                      "is_user_created", "description"):
+            if field in account:
+                print(f"   {field:18} {account[field]}")
+        if account.get("is_active") is False:
+            print("\n   This account is INACTIVE. Bills cannot be booked to it,")
+            print("   so a different one has to be chosen for these vendors.")
+        return
 
     if args.what == "accounts":
         accounts = await fetch_all(zoho_books_client.get_chartofaccounts)

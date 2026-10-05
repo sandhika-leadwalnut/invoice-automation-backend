@@ -13,6 +13,11 @@ class Settings(BaseSettings):
     gdrive_link: str = ""
     tds_item_id: str = ""
     upload_dir: str = "/app/uploads"
+    # Our own GSTIN, as the buyer on every invoice we receive. A vendor must
+    # never be matched on it: extraction sometimes picks the buyer's GSTIN up as
+    # the vendor's, and any vendor record carrying this value would then absorb
+    # those invoices and lend them its credit terms and bank account.
+    company_gstin: str = "29AAPFB4349A1ZG"
     
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 

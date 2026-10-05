@@ -109,6 +109,44 @@ def _parse_invoice_date(value: Any):
         return None
 
 
+# Extraction normalises dates to yyyy-mm-dd using US day/month order, so an
+# Indian invoice dated 01/10/2026 arrives as 2026-01-10. Only dates on the 1st
+# to the 12th can be misread this way - past the 12th there is no valid US
+# reading - which is why the damage looks random rather than total.
+FLIP_MUST_BEAT_BY_DAYS = 30   # how much closer the swap has to be before trusting it
+FLIP_PLAUSIBLE_WINDOW = 60    # how near the arrival date the swap must land
+
+
+def _corrected_invoice_date(raw: Any, arrived=None):
+    """
+    Spot a day/month swap and return the corrected date, or None.
+
+    Only corrects when the swap is provably better: clearly closer to the day
+    the invoice reached us, and not in the future. A genuinely old invoice -
+    one sent months late - fails those tests and is left exactly as it is,
+    because silently redating a real invoice is worse than leaving a wrong one
+    visible.
+    """
+    parsed = _parse_invoice_date(raw)
+    if not parsed or parsed.day > 12:
+        return None
+
+    arrived = arrived or datetime.utcnow().date()
+    try:
+        swapped = parsed.replace(month=parsed.day, day=parsed.month)
+    except ValueError:
+        return None
+
+    current_gap = abs((arrived - parsed).days)
+    swapped_gap = abs((arrived - swapped).days)
+
+    if (swapped_gap + FLIP_MUST_BEAT_BY_DAYS < current_gap
+            and swapped <= arrived + timedelta(days=1)
+            and swapped_gap <= FLIP_PLAUSIBLE_WINDOW):
+        return swapped
+    return None
+
+
 def _financial_year(value: Any) -> str:
     """Indian financial year running April to March, e.g. '2026-2027'."""
     parsed = _parse_invoice_date(value)
@@ -341,6 +379,28 @@ def _next_payment_cycle(invoice_date: date) -> Optional[date]:
     return upcoming[0] if upcoming else None
 
 
+def _usable_vendor_gstin(value: Any) -> Optional[str]:
+    """
+    A vendor GSTIN worth matching on.
+
+    Returns None for our own GSTIN. Extraction occasionally reads the buyer's
+    GSTIN into vendor_gstin, and a vendor record that happens to carry that same
+    value would then swallow every such invoice - handing it that vendor's
+    credit period and, on a payment sheet, that vendor's bank account. One such
+    record has already done exactly that.
+    """
+    gstin = str(value or "").strip()
+    if not gstin:
+        return None
+    if _norm_text(gstin) == _norm_text(settings.company_gstin):
+        logger.warning(
+            "Invoice carries our own GSTIN as the vendor's; ignoring it for "
+            "vendor matching - extraction has most likely read the buyer's."
+        )
+        return None
+    return gstin
+
+
 async def _find_vendor_doc(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """Fetch the vendor master record, by the same ladder used to resolve Zoho."""
     vendors_col = db["vendors"]
@@ -349,9 +409,9 @@ async def _find_vendor_doc(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         vendor = await vendors_col.find_one({"vendor_id": vendor_id})
         if vendor:
             return vendor
-    gstin = payload.get("vendor_gstin")
+    gstin = _usable_vendor_gstin(payload.get("vendor_gstin"))
     if gstin:
-        vendor = await vendors_col.find_one({"gstin": str(gstin).strip()})
+        vendor = await vendors_col.find_one({"gstin": gstin})
         if vendor:
             return vendor
     return None
@@ -442,7 +502,8 @@ async def resolve_vendor_zoho_contact(payload: Dict[str, Any]) -> bool:
     """
     vendors_col = db["vendors"]
     vendor_id = payload.get("vendor_id")
-    gstin = payload.get("vendor_gstin")
+    # Never our own GSTIN - see _usable_vendor_gstin.
+    gstin = _usable_vendor_gstin(payload.get("vendor_gstin"))
     vendor_name = payload.get("vendor_name")
     
     def apply_vendor_data(v_doc):
@@ -543,6 +604,24 @@ async def ingest_invoice(payload: Dict[str, Any], response: Response):
             except (ValueError, TypeError, ZeroDivisionError):
                 pass
 
+    # Catch a day/month swap before anything is derived from the date - the due
+    # date, the financial year in the dedupe key and the payment sheet all read
+    # it, so a wrong date here propagates everywhere.
+    date_correction = None
+    corrected_date = _corrected_invoice_date(payload.get("invoice_date"))
+    if corrected_date:
+        date_correction = {
+            "from": str(payload.get("invoice_date")),
+            "to": corrected_date.isoformat(),
+            "reason": "day/month order swapped by extraction",
+            "at": datetime.utcnow(),
+        }
+        logger.warning(
+            f"Invoice date {payload.get('invoice_date')!r} looks day/month swapped "
+            f"against today; reading it as {corrected_date}"
+        )
+        payload["invoice_date"] = corrected_date.isoformat()
+
     # The vendor has to be resolved before the duplicate keys are built, because
     # vendor_id is the anchor and it only exists once this has run.
     vendor_exists = await resolve_vendor_zoho_contact(payload)
@@ -633,6 +712,9 @@ async def ingest_invoice(payload: Dict[str, Any], response: Response):
         "vendor_id": payload.get("vendor_id"),
         "zoho_contact_id": payload.get("zoho_contact_id"),
         "expected_payment_date": expected_payment_date,
+        # Present only when the date was corrected, so a reviewer can see it
+        # happened rather than wondering why the date differs from the PDF.
+        "invoice_date_corrected": date_correction,
         "created_at": datetime.utcnow(),
         "updated_at": datetime.utcnow()
     }
@@ -911,10 +993,20 @@ async def vendors_mapped():
     vendors, not just the ones that happen to appear on an existing invoice.
     """
     cursor = db["vendors"].find(
-        {}, {"_id": 0, "vendor_name": 1, "gstin": 1, "vendor_id": 1}
-    )
+        {},
+        {"_id": 0, "vendor_name": 1, "gstin": 1, "pan": 1, "vendor_id": 1,
+         "ledger_name": 1, "ledger_id": 1, "credit_days": 1, "bank_details": 1},
+    ).sort("vendor_name", 1)
     vendors = await cursor.to_list(length=5000)
-    return [v for v in vendors if v.get("vendor_name")]
+    return [
+        {
+            **v,
+            # The mapping screen cares whether bank details exist, not what they
+            # are - account numbers have no reason to reach a browser.
+            "has_bank_details": bool(v.pop("bank_details", None)),
+        }
+        for v in vendors if v.get("vendor_name")
+    ]
 
 
 @router.post("/invoice/{id}/action")
@@ -1292,7 +1384,7 @@ async def payment_sheet(payload: Dict[str, Any]):
         # Top level first - that is where it is kept from ingestion onward, and
         # it survives everything. The payload is the fallback for older records.
         vendor_id = invoice.get("vendor_id") or data.get("vendor_id")
-        gstin = invoice.get("vendor_gstin") or data.get("vendor_gstin")
+        gstin = _usable_vendor_gstin(invoice.get("vendor_gstin") or data.get("vendor_gstin"))
         vendor_name = invoice.get("vendor_name") or data.get("vendor_name")
 
         vendor = None

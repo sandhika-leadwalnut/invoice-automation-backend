@@ -119,8 +119,13 @@ def read_ledger_map(path):
             keys = {k.strip().lower(): (v or "").strip() for k, v in row.items() if k}
             vendor = keys.get("vendor") or keys.get("vendor name") or keys.get("party name")
             ledger = keys.get("ledger") or keys.get("suggested ledger") or keys.get("ledger name")
-            if vendor and ledger:
-                mapping[norm(vendor)] = ledger
+            # A ledger id given here wins over resolving the name. Zoho's
+            # chart-of-accounts listing does not return every account - "Staff
+            # Welfare" is active and usable but absent from it - so a name
+            # lookup alone cannot reach them.
+            ledger_id = next((keys[k] for k in keys if k.startswith("ledger id")), "")
+            if vendor and (ledger or ledger_id):
+                mapping[norm(vendor)] = {"name": ledger, "id": ledger_id}
     return mapping
 
 
@@ -220,16 +225,23 @@ async def stage(args):
         zoho_gstin, _, _ = classify_tax_id(contact.get("gst_no"))
         m["gstin"] = m["gstin"] or zoho_gstin
 
-        ledger_name = m["ledger"] or ledger_map.get(norm(m["name"])) or args.ledger
-        if not ledger_name:
+        mapped = ledger_map.get(norm(m["name"])) or {}
+        ledger_name = m["ledger"] or mapped.get("name") or args.ledger
+        ledger_id = mapped.get("id") or None
+
+        if not (ledger_name or ledger_id):
             m["why"] = "no ledger given"
             no_ledger.append(m)
             continue
-        ledger_id = accounts_by_name.get(norm(ledger_name))
+
         if not ledger_id:
-            m["why"] = f"ledger {ledger_name!r} is not in the chart of accounts"
+            ledger_id = accounts_by_name.get(norm(ledger_name))
+        if not ledger_id:
+            m["why"] = (f"ledger {ledger_name!r} is not in the chart of accounts - "
+                        f"put its account id in the Ledger ID column instead")
             no_ledger.append(m)
             continue
+        ledger_name = ledger_name or f"(account {ledger_id})"
 
         m["ledger_name"] = ledger_name
         m["ledger_id"] = str(ledger_id)

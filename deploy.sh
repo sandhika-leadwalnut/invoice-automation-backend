@@ -99,6 +99,8 @@ docker exec "$SERVICE" python test_duplicates.py > /dev/null 2>&1 \
     && echo "    duplicate tests pass" || echo "    !! duplicate tests FAILED"
 docker exec "$SERVICE" python test_payment_date.py > /dev/null 2>&1 \
     && echo "    payment date tests pass" || echo "    !! payment date tests FAILED"
+docker exec "$SERVICE" python test_bank_check.py > /dev/null 2>&1 \
+    && echo "    bank check tests pass" || echo "    !! bank check tests FAILED"
 
 echo
 echo "Deployed. Rollback if needed:"

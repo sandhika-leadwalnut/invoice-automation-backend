@@ -464,6 +464,107 @@ async def _compute_expected_payment_date(payload: Dict[str, Any]) -> Optional[da
     return datetime(due.year, due.month, due.day)
 
 
+# --- Bank detail checking -------------------------------------------------
+#
+# A vendor's bank account changing is the single most abused route into a
+# payments process: a convincing invoice with a new account number, and the
+# money goes somewhere else. So the account an invoice asks to be paid into is
+# compared against the one on the vendor master, and any difference is flagged
+# for a person.
+#
+# Two rules this must never break:
+#   - a mismatch NEVER updates the stored details. Letting an invoice rewrite
+#     the vendor master is exactly the attack.
+#   - the payment sheet always uses the STORED details, never the invoice's.
+#
+# Extraction field names vary, so several spellings are accepted.
+BANK_ACCOUNT_FIELDS = (
+    "vendor_bank_account", "bank_account", "account_number", "vendor_account_number",
+    "bank_account_number", "account_no", "vendor_account",
+)
+BANK_IFSC_FIELDS = (
+    "vendor_bank_ifsc", "bank_ifsc", "ifsc", "ifsc_code", "vendor_ifsc",
+)
+BANK_NAME_FIELDS = (
+    "vendor_bank_name", "bank_name", "bank", "vendor_bank",
+)
+
+
+def _first_present(payload: Dict[str, Any], fields) -> Optional[str]:
+    for field in fields:
+        value = payload.get(field)
+        if value not in (None, "", "-"):
+            return str(value).strip()
+    return None
+
+
+def _norm_account(value: Any) -> str:
+    """Account numbers vary by spacing and punctuation, never by digits."""
+    return re.sub(r"[^A-Z0-9]", "", str(value or "").upper())
+
+
+async def _check_bank_details(payload: Dict[str, Any], vendor: Optional[Dict[str, Any]]):
+    """
+    Compare the bank details on an invoice against the vendor master.
+
+    Returns a dict to store on the invoice, or None when there is nothing to
+    say. Deliberately silent when the invoice carries no bank details - most do
+    not, and a warning on every one of them would train people to ignore it.
+    """
+    invoice_account = _first_present(payload, BANK_ACCOUNT_FIELDS)
+    invoice_ifsc = _first_present(payload, BANK_IFSC_FIELDS)
+    if not (invoice_account or invoice_ifsc):
+        return None
+
+    stored = (vendor or {}).get("bank_details") or {}
+    if not stored:
+        # Nothing to compare against. Worth recording so the first account seen
+        # for a vendor can be checked once, rather than assumed.
+        return {
+            "status": "unverified",
+            "reason": "no bank details on the vendor master to compare against",
+            "invoice": {
+                "account_number": invoice_account,
+                "ifsc": invoice_ifsc,
+                "bank": _first_present(payload, BANK_NAME_FIELDS),
+            },
+            "checked_at": datetime.utcnow(),
+        }
+
+    differences = []
+    if invoice_account and _norm_account(invoice_account) != _norm_account(stored.get("account_number")):
+        differences.append({
+            "field": "account_number",
+            "on_invoice": invoice_account,
+            "on_record": stored.get("account_number"),
+        })
+    if invoice_ifsc and _norm_account(invoice_ifsc) != _norm_account(stored.get("ifsc")):
+        differences.append({
+            "field": "ifsc",
+            "on_invoice": invoice_ifsc,
+            "on_record": stored.get("ifsc"),
+        })
+
+    if not differences:
+        return {"status": "matched", "checked_at": datetime.utcnow()}
+
+    logger.warning(
+        "Bank details on invoice %s from %r do not match the vendor master: %s",
+        payload.get("invoice_number"), payload.get("vendor_name"),
+        ", ".join(d["field"] for d in differences),
+    )
+    return {
+        "status": "mismatch",
+        "differences": differences,
+        "invoice": {
+            "account_number": invoice_account,
+            "ifsc": invoice_ifsc,
+            "bank": _first_present(payload, BANK_NAME_FIELDS),
+        },
+        "checked_at": datetime.utcnow(),
+    }
+
+
 async def ensure_indexes():
     """Indexes backing the duplicate lookups. Safe to call on every startup."""
     try:
@@ -674,6 +775,9 @@ async def ingest_invoice(payload: Dict[str, Any], response: Response):
     # during review.
     expected_payment_date = await _compute_expected_payment_date(payload)
 
+    # Does this invoice ask to be paid into the account we have on file?
+    bank_check = await _check_bank_details(payload, await _find_vendor_doc(payload))
+
     # A dedupe_key match on its own means same vendor, same invoice number, same
     # financial year - but a different amount or date. That is either a resend
     # we could not confirm or a corrected invoice re-issued under the old
@@ -715,6 +819,8 @@ async def ingest_invoice(payload: Dict[str, Any], response: Response):
         # Present only when the date was corrected, so a reviewer can see it
         # happened rather than wondering why the date differs from the PDF.
         "invoice_date_corrected": date_correction,
+        # None when the invoice carries no bank details, which is most of them.
+        "bank_check": bank_check,
         "created_at": datetime.utcnow(),
         "updated_at": datetime.utcnow()
     }

@@ -62,6 +62,7 @@ test_tds.py
 test_tds_real.py
 test_zoho.py
 
-# NOTE: test_duplicates.py and test_payment_date.py are deliberately NOT
+# NOTE: test_duplicates.py, test_payment_date.py and test_bank_check.py are
+# deliberately NOT
 # excluded. deploy.sh runs them inside the container after a deploy to prove
 # the image really contains the code it is supposed to. They need no database.

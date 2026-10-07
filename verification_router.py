@@ -493,14 +493,73 @@ BANK_NAME_FIELDS = (
 def _first_present(payload: Dict[str, Any], fields) -> Optional[str]:
     for field in fields:
         value = payload.get(field)
-        if value not in (None, "", "-"):
-            return str(value).strip()
+        if value in (None, "", "-"):
+            continue
+        if isinstance(value, float) and value.is_integer():
+            # Extraction sometimes declares the account number as a number
+            # rather than text, in which case it arrives as a float. str() on
+            # a large float gives scientific notation, which is not an account
+            # number and would never match. Render the digits instead.
+            return str(int(value))
+        return str(value).strip()
     return None
 
 
 def _norm_account(value: Any) -> str:
     """Account numbers vary by spacing and punctuation, never by digits."""
     return re.sub(r"[^A-Z0-9]", "", str(value or "").upper())
+
+
+# Bank details are read off a PDF, and OCR confuses letters with the digits
+# they resemble - KARB0000107 comes back as KARBO000107, with a letter O in
+# place of the reserved zero.
+#
+# Correcting these is only safe where a letter cannot legitimately appear,
+# because a correction that could apply to real data would hide exactly the
+# change this check exists to catch. Two places qualify:
+#
+#   - position five of an IFSC, which the RBI reserves as '0'. Any other
+#     character there is a misreading, with no exceptions.
+#   - an account number whose stored counterpart is entirely numeric, as every
+#     Indian bank account number is. A letter in the extracted value cannot be
+#     a different account; it can only be a misread digit.
+#
+# Outside those two cases the comparison stays strict.
+OCR_DIGIT_LOOKALIKES = str.maketrans({
+    "O": "0", "Q": "0", "D": "0",
+    "I": "1", "L": "1",
+    "Z": "2", "S": "5", "G": "6", "B": "8",
+})
+
+
+def _norm_ifsc(value: Any) -> str:
+    """
+    Canonical IFSC: four letters, a reserved '0', then six alphanumerics.
+
+    Only position five is corrected. The last six characters may legitimately
+    contain letters, so a letter there is left exactly as read.
+    """
+    code = _norm_account(value)
+    if len(code) == 11 and code[4] != "0":
+        code = code[:4] + "0" + code[5:]
+    return code
+
+
+def _accounts_match(invoice_value: Any, stored_value: Any) -> bool:
+    """
+    True when the invoice asks to be paid into the account on record.
+
+    Falls back to OCR folding only when the stored account is numeric and the
+    two are the same length - a genuine change of account would not survive
+    that test, because it would differ in digits, not in letter shapes.
+    """
+    seen = _norm_account(invoice_value)
+    record = _norm_account(stored_value)
+    if seen == record:
+        return True
+    if record.isdigit() and len(seen) == len(record):
+        return seen.translate(OCR_DIGIT_LOOKALIKES) == record
+    return False
 
 
 async def _check_bank_details(payload: Dict[str, Any], vendor: Optional[Dict[str, Any]]):
@@ -531,31 +590,62 @@ async def _check_bank_details(payload: Dict[str, Any], vendor: Optional[Dict[str
             "checked_at": datetime.utcnow(),
         }
 
+    # Which vendor record this was compared against. Without it, a flag caused
+    # by resolving to the wrong vendor looks identical to a real account
+    # change, and telling them apart means querying the database by hand.
+    matched_vendor = {
+        "name": (vendor or {}).get("vendor_name"),
+        "id": (vendor or {}).get("_id"),
+    }
+
     differences = []
-    if invoice_account and _norm_account(invoice_account) != _norm_account(stored.get("account_number")):
+    ocr_corrected = []
+
+    if invoice_account and not _accounts_match(invoice_account, stored.get("account_number")):
         differences.append({
             "field": "account_number",
             "on_invoice": invoice_account,
             "on_record": stored.get("account_number"),
         })
-    if invoice_ifsc and _norm_account(invoice_ifsc) != _norm_account(stored.get("ifsc")):
+    elif invoice_account and _norm_account(invoice_account) != _norm_account(stored.get("account_number")):
+        ocr_corrected.append("account_number")
+
+    if invoice_ifsc and _norm_ifsc(invoice_ifsc) != _norm_ifsc(stored.get("ifsc")):
         differences.append({
             "field": "ifsc",
             "on_invoice": invoice_ifsc,
             "on_record": stored.get("ifsc"),
         })
+    elif invoice_ifsc and _norm_account(invoice_ifsc) != _norm_account(stored.get("ifsc")):
+        ocr_corrected.append("ifsc")
 
     if not differences:
-        return {"status": "matched", "checked_at": datetime.utcnow()}
+        if ocr_corrected:
+            # Matched, but only after correcting a misread character. Worth
+            # recording: a vendor whose details need correcting every month
+            # points at an extraction problem to fix at the source.
+            logger.info(
+                "Bank details on invoice %s from %r matched after OCR correction: %s",
+                payload.get("invoice_number"), payload.get("vendor_name"),
+                ", ".join(ocr_corrected),
+            )
+        return {
+            "status": "matched",
+            "matched_vendor": matched_vendor,
+            "ocr_corrected": ocr_corrected or None,
+            "checked_at": datetime.utcnow(),
+        }
 
     logger.warning(
-        "Bank details on invoice %s from %r do not match the vendor master: %s",
+        "Bank details on invoice %s from %r do not match the vendor master %r: %s",
         payload.get("invoice_number"), payload.get("vendor_name"),
+        matched_vendor["name"],
         ", ".join(d["field"] for d in differences),
     )
     return {
         "status": "mismatch",
         "differences": differences,
+        "matched_vendor": matched_vendor,
         "invoice": {
             "account_number": invoice_account,
             "ifsc": invoice_ifsc,
@@ -681,7 +771,14 @@ async def ingest_invoice(payload: Dict[str, Any], response: Response):
 
     # Fingerprint the file before anything else. This is the one check that does
     # not care what Unstract managed to read off the page.
-    file_sha256 = _file_sha256(base64_pdf)
+    #
+    # Ingestion sends source_sha256: the hash of the file as the vendor sent it.
+    # For a PDF that equals what we would compute here. For a Word document
+    # converted on the way in it does not, and only the original is stable -
+    # LibreOffice stamps a creation time into every PDF it writes, so the same
+    # .docx converted twice hashes differently and would never match itself.
+    # Prefer what ingestion sent, and fall back for any caller that omits it.
+    file_sha256 = payload.pop("source_sha256", None) or _file_sha256(base64_pdf)
 
     # Map items_table to line_items if Unstract populated items_table instead
     if "items_table" in payload and isinstance(payload["items_table"], list) and len(payload["items_table"]) > 0:

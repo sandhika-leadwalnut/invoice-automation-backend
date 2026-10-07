@@ -12,7 +12,9 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from verification_router import _check_bank_details, _norm_account  # noqa: E402
+from verification_router import (  # noqa: E402
+    _check_bank_details, _norm_account, _norm_ifsc, _accounts_match,
+)
 
 failures = []
 VENDOR = {"bank_details": {"bank": "HDFC Bank", "ifsc": "HDFC0001388",
@@ -80,6 +82,52 @@ print("\n7. Normalisation")
 check("punctuation ignored", _norm_account("5010-0723 8810/09"), "50100723881009")
 check("case folded", _norm_account("hdfc0001388"), "HDFC0001388")
 check("None is empty", _norm_account(None), "")
+
+print("\n8. OCR misreads letters as digits")
+# The real case: Meeting Minds Infosystems, invoice 14-2026-27. The PDF says
+# KARB0000107; extraction returned KARBO000107, with a letter O in the
+# position the RBI reserves for a zero. The account number was read correctly.
+MEETING_MINDS = {"vendor_name": "MEETING MINDS INFOSYSTEMS",
+                 "bank_details": {"bank": "Karnataka Bank", "ifsc": "KARB0000107",
+                                  "account_number": "1072000110077201"}}
+check("letter O for zero in the reserved IFSC position",
+      status_of({"vendor_bank_account": "1072000110077201",
+                 "vendor_bank_ifsc": "KARBO000107"}, MEETING_MINDS), "matched")
+check("the correction is recorded, not hidden",
+      asyncio.run(_check_bank_details(
+          {"vendor_bank_ifsc": "KARBO000107"}, MEETING_MINDS))["ocr_corrected"], ["ifsc"])
+check("a clean match records no correction",
+      asyncio.run(_check_bank_details(
+          {"vendor_bank_ifsc": "KARB0000107"}, MEETING_MINDS))["ocr_corrected"], None)
+check("misread digits in a numeric account",
+      status_of({"bank_account": "5O1OO723881OO9"}), "matched")
+check("letters in the last six of an IFSC are left alone",
+      _norm_ifsc("KARB0OOO107"), "KARB0OOO107")
+
+print("\n9. OCR folding must not hide a real change")
+check("a genuinely different account still fails",
+      status_of({"bank_account": "99999999999999"}), "mismatch")
+check("one digit different still fails",
+      status_of({"bank_account": "50100723881008"}), "mismatch")
+check("a different bank's IFSC still fails",
+      status_of({"ifsc": "ICIC0000297"}), "mismatch")
+check("same digits, different length is not a match",
+      _accounts_match("5010072388100", "50100723881009"), False)
+check("folding is refused when the record is not numeric",
+      _accounts_match("OO123", "00123X"), False)
+
+print("\n10. Account numbers typed as numbers by extraction")
+check("a float does not become scientific notation",
+      status_of({"vendor_bank_account": 1072000110077201.0}, MEETING_MINDS), "matched")
+check("leading zeros survive when sent as text",
+      status_of({"vendor_bank_account": "000905026841"},
+                {"bank_details": {"account_number": "000905026841"}}), "matched")
+
+print("\n11. The flag says which vendor it compared against")
+res = asyncio.run(_check_bank_details(
+    {"bank_account": "99999999999999"}, MEETING_MINDS))
+check("names the vendor record used",
+      res["matched_vendor"]["name"], "MEETING MINDS INFOSYSTEMS")
 
 print("\n" + "=" * 58)
 if failures:

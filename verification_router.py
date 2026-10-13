@@ -2,6 +2,7 @@ from fastapi import APIRouter, HTTPException, BackgroundTasks, status, Query, Re
 from typing import Dict, Any, List, Optional
 from datetime import datetime, timedelta, date
 import uuid
+from bson import ObjectId
 from motor.motor_asyncio import AsyncIOMotorClient
 import logging
 import asyncio
@@ -593,9 +594,14 @@ async def _check_bank_details(payload: Dict[str, Any], vendor: Optional[Dict[str
     # Which vendor record this was compared against. Without it, a flag caused
     # by resolving to the wrong vendor looks identical to a real account
     # change, and telling them apart means querying the database by hand.
+    # str(), not the raw value: the vendors collection keys on ObjectId while
+    # invoices key on a uuid string. An ObjectId stored here cannot be
+    # serialised to JSON, and since /invoices/all returns every invoice in one
+    # response, a single one of them is enough to blank the whole dashboard.
+    vendor_id = (vendor or {}).get("_id")
     matched_vendor = {
         "name": (vendor or {}).get("vendor_name"),
-        "id": (vendor or {}).get("_id"),
+        "id": str(vendor_id) if vendor_id is not None else None,
     }
 
     differences = []
@@ -1128,12 +1134,30 @@ async def get_metrics(
     }
 
 
+def _jsonable(value):
+    """
+    Make a Mongo document safe to serialise.
+
+    This endpoint returns every invoice in a single response, so one value
+    FastAPI cannot encode takes down the entire dashboard rather than one row.
+    ObjectId is the one that bites - vendors key on it, invoices do not, and
+    anything copied between the two carries it across.
+    """
+    if isinstance(value, ObjectId):
+        return str(value)
+    if isinstance(value, dict):
+        return {k: _jsonable(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_jsonable(v) for v in value]
+    return value
+
+
 @router.get("/invoices/all")
 async def get_all_invoices():
     """Retrieve all invoices for the dashboard, excluding soft-deleted ones."""
     cursor = invoices_col.find(dict(NOT_DELETED)).sort("created_at", -1)
     invoices = await cursor.to_list(length=1000)
-    return invoices
+    return [_jsonable(doc) for doc in invoices]
 
 @router.get("/invoice/{id}")
 async def get_invoice(id: str):

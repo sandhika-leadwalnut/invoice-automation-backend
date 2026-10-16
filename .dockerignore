@@ -39,10 +39,12 @@ deploy.sh
 #     and are run by hand from a laptop; shipping them lets someone exec into
 #     a production container and mutate the vendor master by accident. ---
 add_vendor.py
+add_one_vendor.py
 add_missing_vendors.py
 check_vendor.py
 copy_vendor_terms.py
 set_vendor_terms.py
+set_vendor_ledger.py
 remove_vendor.py
 list_zoho.py
 suggest_vendor_aliases.py
@@ -52,6 +54,8 @@ recheck_bank_details.py
 fix_objectid_fields.py
 backfill_payment_dates.py
 reset_duplicate_counters.py
+redate_manual_pushes.py
+mark_pushed_manually.py
 auth_setup.py
 get_taxes.py
 get_all_taxes.py

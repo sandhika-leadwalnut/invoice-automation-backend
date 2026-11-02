@@ -1,11 +1,12 @@
 from fastapi import APIRouter, HTTPException, BackgroundTasks, status, Query, Response
 from typing import Dict, Any, List, Optional
-from datetime import datetime, timedelta, date
+from datetime import datetime, timedelta, date, timezone
 import uuid
 from bson import ObjectId
 from motor.motor_asyncio import AsyncIOMotorClient
 import logging
 import asyncio
+import os
 import re
 import base64
 import hashlib
@@ -661,6 +662,86 @@ async def _check_bank_details(payload: Dict[str, Any], vendor: Optional[Dict[str
     }
 
 
+# --- Scheduled payments -----------------------------------------------------
+#
+# A payment run is known in advance: the sheet is downloaded on the 3rd for a
+# run on the 5th. Marking the invoices paid at download time would say the
+# money has moved when it has not, and leaving it to be done by hand on the day
+# means it is forgotten.
+#
+# So the date is recorded as an intention - payment_scheduled_at - and a loop
+# turns intentions into facts once the time arrives. Nothing is held in memory:
+# the schedule lives on the invoice, so a restart, a crash or a server that was
+# off at the appointed minute all resolve themselves on the next pass.
+# Five minutes is fine for a run that happens twice a month; drop it to 30 or
+# so when testing, so a schedule set two minutes out is not a five minute wait.
+PAYMENT_SETTLE_INTERVAL_SECONDS = int(
+    os.getenv("PAYMENT_SETTLE_INTERVAL_SECONDS", "300")
+)
+
+
+async def settle_due_payments() -> int:
+    """
+    Move invoices whose scheduled payment time has arrived to paid.
+
+    paid_at is the scheduled time, not the moment this ran. The run was at
+    10:00 on the 5th whether this loop noticed at 10:02 or after a restart on
+    the 6th, and every paid figure is keyed to when the money moved.
+    """
+    now = datetime.utcnow()
+    due = await invoices_col.find(
+        {
+            "status": "accepted",
+            "payment_scheduled_at": {"$lte": now},
+            **NOT_DELETED,
+        },
+        {"payment_scheduled_at": 1, "vendor_name": 1},
+    ).to_list(length=1000)
+
+    settled = 0
+    for doc in due:
+        result = await invoices_col.update_one(
+            # status repeated in the filter so two passes cannot both claim the
+            # same invoice, and so one that was paid or rejected in between is
+            # left exactly as it is.
+            {"_id": doc["_id"], "status": "accepted", **NOT_DELETED},
+            {
+                "$set": {
+                    "status": "paid",
+                    "paid_at": doc["payment_scheduled_at"],
+                    "paid_recorded_at": now,
+                    "paid_via": "schedule",
+                    "updated_at": now,
+                },
+                "$unset": {"payment_scheduled_at": ""},
+            },
+        )
+        settled += result.modified_count
+
+    if settled:
+        logger.info("Settled %d scheduled payment(s)", settled)
+    return settled
+
+
+async def run_payment_scheduler():
+    """
+    Check for due payments forever. Started from main.py on startup.
+
+    Every error is swallowed and retried rather than ending the loop: a loop
+    that dies leaves invoices stuck in accepted with a date in the past, which
+    looks exactly like nobody having done anything.
+    """
+    logger.info(
+        "Scheduled payments will be settled every %ds", PAYMENT_SETTLE_INTERVAL_SECONDS
+    )
+    while True:
+        try:
+            await settle_due_payments()
+        except Exception as e:
+            logger.error("Could not settle scheduled payments, will retry: %s", e)
+        await asyncio.sleep(PAYMENT_SETTLE_INTERVAL_SECONDS)
+
+
 async def ensure_indexes():
     """Indexes backing the duplicate lookups. Safe to call on every startup."""
     try:
@@ -670,6 +751,8 @@ async def ensure_indexes():
         await invoices_col.create_index("dedupe_key", sparse=True)
         await invoices_col.create_index("status")
         await invoices_col.create_index("deleted_at", sparse=True)
+        # Read every few minutes by the settle loop.
+        await invoices_col.create_index("payment_scheduled_at", sparse=True)
         logger.info("Duplicate-detection indexes are in place")
     except Exception as e:
         # An index that cannot be built should not stop the service starting;
@@ -1152,12 +1235,30 @@ def _jsonable(value):
     return value
 
 
+# Fields that are a moment in time rather than a calendar date. Mongo stores
+# them in UTC but hands back naive datetimes, which FastAPI then serialises
+# without a zone - "2026-10-29T06:53:00". The browser reads that as LOCAL time,
+# so a payment scheduled for 12:23 IST displays as 06:53. Saying UTC explicitly
+# fixes it, and only these fields are touched: the date-like ones (invoice_date,
+# expected_payment_date) are midnight values where adding an offset could shift
+# the day.
+INSTANT_FIELDS = ("payment_scheduled_at", "paid_at", "paid_recorded_at", "accepted_at")
+
+
+def _with_timezone(doc: Dict[str, Any]) -> Dict[str, Any]:
+    for field in INSTANT_FIELDS:
+        value = doc.get(field)
+        if isinstance(value, datetime) and value.tzinfo is None:
+            doc[field] = value.replace(tzinfo=timezone.utc)
+    return doc
+
+
 @router.get("/invoices/all")
 async def get_all_invoices():
     """Retrieve all invoices for the dashboard, excluding soft-deleted ones."""
     cursor = invoices_col.find(dict(NOT_DELETED)).sort("created_at", -1)
     invoices = await cursor.to_list(length=1000)
-    return [_jsonable(doc) for doc in invoices]
+    return [_with_timezone(_jsonable(doc)) for doc in invoices]
 
 @router.get("/invoice/{id}")
 async def get_invoice(id: str):
@@ -1442,7 +1543,104 @@ PAYMENT_SHEET_PRODUCT = "VPAY"
 PAYMENT_SHEET_DEBIT_ACCOUNT = 7411623583
 
 
-def _payment_sheet_row(invoice: Dict[str, Any], vendor: Optional[Dict[str, Any]]) -> List[Any]:
+def _payment_run_date(today: Optional[date] = None) -> date:
+    """
+    The date this payment run will be executed.
+
+    Every row in one sheet is paid on the same day - the sheet IS the run - so
+    the date column is a property of the download, not of the invoice. It used
+    to carry each invoice's own due date, which produced a file asking the bank
+    to pay on twelve different dates at once.
+
+    Payments go out on the 5th and the 20th:
+
+        downloaded on or before the 5th   ->  the 5th of this month
+        downloaded between the 6th and 20th -> the 20th of this month
+        downloaded after the 20th         ->  the 5th of next month
+
+    Note this says nothing about whether an invoice is due yet. Anything in the
+    sheet is being paid on that date, so only include what should go out now.
+    """
+    today = today or datetime.utcnow().date()
+    first, second = PAYMENT_CYCLE_DAYS           # (5, 20)
+
+    if today.day <= first:
+        return today.replace(day=first)
+    if today.day <= second:
+        return today.replace(day=second)
+
+    next_month = (today.replace(day=1) + timedelta(days=32)).replace(day=1)
+    return next_month.replace(day=first)
+
+
+TAXABLE_VALUE_FIELDS = ("subtotal", "taxable_value", "taxable_amount", "basic_amount")
+TAX_TOTAL_FIELDS = ("tax_total", "total_tax", "gst_total")
+TAX_COMPONENT_FIELDS = ("cgst", "sgst", "igst", "cess", "utgst")
+
+
+def _taxable_value(data: Dict[str, Any], total: Optional[float]):
+    """
+    The invoice value TDS is calculated on, and how we arrived at it.
+
+    TDS is deducted on the value excluding GST whenever GST is shown separately
+    (CBDT Circular 23/2017). Deducting on the gross would short-pay the vendor
+    and over-deposit tax, so the GST has to come out first.
+
+    Returns (value, basis) where basis says which route was taken, because
+    "we assumed there was no GST" and "the invoice told us the subtotal" carry
+    very different levels of confidence and Finance should see which is which.
+    """
+    for field in TAXABLE_VALUE_FIELDS:
+        value = _norm_amount(data.get(field))
+        if value:
+            return value, "subtotal"
+
+    if total is not None:
+        for field in TAX_TOTAL_FIELDS:
+            tax = _norm_amount(data.get(field))
+            if tax:
+                return round(total - tax, 2), "total less tax"
+
+        components = [_norm_amount(data.get(f)) for f in TAX_COMPONENT_FIELDS]
+        tax = sum(c for c in components if c)
+        if tax:
+            return round(total - tax, 2), "total less GST components"
+
+    # No tax anywhere on the invoice. For a vendor billing without GST - most
+    # of the individuals paid under PAN - the total IS the taxable value, so
+    # this is usually right. It is reported anyway: if the invoice did carry
+    # GST that extraction missed, this over-deducts.
+    return total, "assumed no GST"
+
+
+def _tds_for(invoice: Dict[str, Any], data: Dict[str, Any],
+             vendor: Optional[Dict[str, Any]], total: Optional[float]):
+    """
+    (tds_amount, basis) for one invoice. No rate on the vendor means no TDS -
+    a missing rate is read as zero, never guessed.
+    """
+    rate = (vendor or {}).get("tds_rate")
+    try:
+        rate = float(rate or 0)
+    except (TypeError, ValueError):
+        rate = 0.0
+    if rate <= 0 or total is None:
+        return 0.0, None
+
+    taxable, basis = _taxable_value(data, total)
+    if taxable is None:
+        return 0.0, None
+
+    # Rounded to the rupee, which is how TDS is deposited and how the
+    # certificate will read.
+    return float(round(taxable * rate)), basis
+
+
+def _payment_sheet_row(
+    invoice: Dict[str, Any],
+    vendor: Optional[Dict[str, Any]],
+    run_date: date,
+) -> List[Any]:
     bank = (vendor or {}).get("bank_details") or {}
     bank_name = str(bank.get("bank") or "")
 
@@ -1452,12 +1650,18 @@ def _payment_sheet_row(invoice: Dict[str, Any], vendor: Optional[Dict[str, Any]]
         else invoice.get("total_amount")
     )
 
-    due = invoice.get("expected_payment_date")
-    if isinstance(due, datetime):
-        due_text = due.strftime("%d/%m/%Y")
-    else:
-        fallback = _next_payment_cycle(datetime.utcnow().date())
-        due_text = fallback.strftime("%d/%m/%Y") if fallback else ""
+    # What goes to the bank is what the vendor is actually paid: the invoice
+    # total less the tax withheld at source. Paying the gross and recovering
+    # the TDS afterwards is not a thing that happens.
+    tds, _ = _tds_for(invoice, data, vendor, amount)
+    if amount is not None and tds:
+        amount = round(amount - tds, 2)
+
+    # The run date, identical on every row. The invoice's own
+    # expected_payment_date still drives the dashboard, where it answers a
+    # different question: when does this fall due. Here the question is when
+    # the bank is being asked to pay, and that is one date for the file.
+    due_text = run_date.strftime("%d/%m/%Y")
 
     invoice_number = (
         invoice.get("invoice_number")
@@ -1582,7 +1786,11 @@ async def payment_sheet(payload: Dict[str, Any]):
         )
 
     vendors_col = db["vendors"]
+    # Worked out once, so every row carries the same date even if the build
+    # straddles midnight on the 5th or the 20th.
+    run_date = _payment_run_date()
     rows, missing_bank, no_amount, approximate = [], [], [], []
+    tds_applied, tds_unverified = [], []
     for invoice in invoices:
         data = invoice.get("accepted_data") or invoice.get("invoice_data") or {}
 
@@ -1629,7 +1837,19 @@ async def payment_sheet(payload: Dict[str, Any]):
             if name not in missing_bank:
                 missing_bank.append(name)
 
-        rows.append(_payment_sheet_row(invoice, vendor))
+        # Reported per invoice, because the sheet shows only the net figure and
+        # a deduction nobody noticed is a vendor ringing up about a short
+        # payment. "assumed no GST" is called out separately: it is right for a
+        # vendor billing without GST and wrong if extraction missed the tax,
+        # and only a person looking at the invoice can tell which.
+        tds, basis = _tds_for(invoice, data, vendor, amount)
+        if tds:
+            label = invoice.get("invoice_number") or data.get("invoice_number") or vendor_name
+            tds_applied.append(f"{label}: {tds:.0f}")
+            if basis == "assumed no GST":
+                tds_unverified.append(str(label))
+
+        rows.append(_payment_sheet_row(invoice, vendor, run_date))
 
 
     workbook = Workbook()
@@ -1652,8 +1872,14 @@ async def payment_sheet(payload: Dict[str, Any]):
             "X-Skipped-No-Amount": str(len(no_amount)),
             "X-Approximate-Matches": " | ".join(approximate),
             "X-Row-Count": str(len(rows)),
+            # Amounts in the sheet are net of TDS. Say so, and say where the
+            # taxable value could not be confirmed.
+            "X-TDS-Deducted": " | ".join(tds_applied),
+            "X-TDS-Unverified-Base": " | ".join(tds_unverified),
+            "X-Payment-Run-Date": run_date.strftime("%d/%m/%Y"),
             "Access-Control-Expose-Headers":
-                "X-Missing-Bank-Details, X-Skipped-No-Amount, X-Approximate-Matches, X-Row-Count",
+                "X-Missing-Bank-Details, X-Skipped-No-Amount, X-Approximate-Matches, "
+                "X-Row-Count, X-TDS-Deducted, X-TDS-Unverified-Base, X-Payment-Run-Date",
         },
     )
 
@@ -1668,20 +1894,112 @@ async def bulk_mark_paid(payload: Dict[str, Any]):
     Only invoices currently in the 'accepted' state move to 'paid' — anything
     still pending, edited, rejected or already paid is left untouched and
     reported back as skipped.
+
+    { "ids": [...], "paid_on": "2026-11-05" }
+
+    paid_on is the date the money actually leaves the bank, which is not the
+    same as the moment this is recorded: a sheet downloaded on the 3rd is paid
+    on the 5th. Every figure keyed to payment - Total Paid, the monthly
+    breakdown - uses that date, so recording the click time instead would put
+    a November payment into October.
+
+    When it is omitted the current time is used, which is right for marking
+    something paid after the fact.
     """
     ids = payload.get("ids")
     if not isinstance(ids, list) or not ids:
         raise HTTPException(status_code=400, detail="'ids' must be a non-empty list")
 
     now = datetime.utcnow()
+    paid_on = payload.get("paid_on")
+    if paid_on:
+        try:
+            chosen = datetime.fromisoformat(str(paid_on).replace("Z", "+00:00"))
+        except ValueError:
+            raise HTTPException(
+                status_code=400,
+                detail=f"paid_on {paid_on!r} is not a date. Use YYYY-MM-DD.",
+            )
+        chosen = chosen.replace(tzinfo=None)
+        # A payment run is days away at most. A date years out is a typo, and
+        # it would quietly land the money in the wrong reporting period.
+        if not (now - timedelta(days=400) <= chosen <= now + timedelta(days=90)):
+            raise HTTPException(
+                status_code=400,
+                detail=f"paid_on {chosen.date()} is too far from today to be a payment run",
+            )
+        paid_at = chosen
+    else:
+        paid_at = now
+
+    # A date in the future is an intention, not a fact. Recording it as paid
+    # would claim money has moved that has not, so it is scheduled instead and
+    # the settle loop marks it when the time comes. The invoice stays in
+    # Accepted until then, which is the truth.
+    if paid_at > now:
+        result = await invoices_col.update_many(
+            {"_id": {"$in": ids}, "status": "accepted", **NOT_DELETED},
+            {"$set": {"payment_scheduled_at": paid_at, "updated_at": now}},
+        )
+        return {
+            "status": "scheduled",
+            "scheduled": result.modified_count,
+            "skipped": len(ids) - result.modified_count,
+            "paid_on": paid_at.isoformat(timespec="minutes"),
+        }
+
     result = await invoices_col.update_many(
         {"_id": {"$in": ids}, "status": "accepted", **NOT_DELETED},
-        {"$set": {"status": "paid", "paid_at": now, "updated_at": now}}
+        # paid_at is when the money moved; paid_recorded_at is when we wrote it
+        # down. Keeping both means a date entered days later is still auditable.
+        {"$set": {"status": "paid", "paid_at": paid_at,
+                  "paid_recorded_at": now, "updated_at": now},
+         "$unset": {"payment_scheduled_at": ""}}
     )
 
     return {
         "status": "paid",
         "marked": result.modified_count,
         "skipped": len(ids) - result.modified_count,
+        "paid_on": paid_at.date().isoformat(),
     }
+
+
+@router.post("/invoices/cancel-scheduled-payment")
+async def cancel_scheduled_payment(payload: Dict[str, Any]):
+    """
+    Call off a scheduled payment.
+
+    { "ids": [...] }     omit ids to clear every pending schedule
+
+    A run gets postponed or pulled, and without this the schedule fires anyway
+    and marks invoices paid that were never paid. Only invoices still waiting
+    are affected - anything the loop has already settled stays paid, because
+    cancelling cannot unspend money.
+    """
+    ids = payload.get("ids")
+    query: Dict[str, Any] = {
+        "payment_scheduled_at": {"$exists": True},
+        "status": "accepted",
+        **NOT_DELETED,
+    }
+    if isinstance(ids, list) and ids:
+        query["_id"] = {"$in": ids}
+
+    result = await invoices_col.update_many(
+        query,
+        {"$unset": {"payment_scheduled_at": ""},
+         "$set": {"updated_at": datetime.utcnow()}},
+    )
+    return {"status": "cancelled", "cancelled": result.modified_count}
+
+
+@router.get("/invoices/scheduled-payments")
+async def scheduled_payments():
+    """Invoices waiting for a scheduled payment, soonest first."""
+    docs = await invoices_col.find(
+        {"payment_scheduled_at": {"$exists": True}, "status": "accepted", **NOT_DELETED},
+        {"vendor_name": 1, "invoice_number": 1, "total_amount": 1, "payment_scheduled_at": 1},
+    ).sort("payment_scheduled_at", 1).to_list(length=1000)
+    return [_jsonable(d) for d in docs]
 

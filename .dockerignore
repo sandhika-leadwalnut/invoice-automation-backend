@@ -45,6 +45,7 @@ check_vendor.py
 copy_vendor_terms.py
 set_vendor_terms.py
 set_vendor_ledger.py
+sync_vendor_tds.py
 remove_vendor.py
 list_zoho.py
 suggest_vendor_aliases.py

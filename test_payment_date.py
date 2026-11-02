@@ -97,6 +97,72 @@ print(f"  {'PASS' if ok else 'FAIL'}  every day of a month lands on a 5th or a 2
 if not ok:
     failures.append("cycle produced a non-cycle day")
 
+print("\nPayment sheet run date - one date for the whole file")
+from datetime import date  # noqa: E402
+from verification_router import _payment_run_date  # noqa: E402
+
+for downloaded, expected, why in [
+    (date(2026, 11, 1),  date(2026, 11, 5),  "before the 5th"),
+    (date(2026, 11, 5),  date(2026, 11, 5),  "ON the 5th - still this cycle"),
+    (date(2026, 11, 6),  date(2026, 11, 20), "day after the 5th"),
+    (date(2026, 11, 19), date(2026, 11, 20), "before the 20th"),
+    (date(2026, 11, 20), date(2026, 11, 20), "ON the 20th - still this cycle"),
+    (date(2026, 11, 21), date(2026, 12, 5),  "day after the 20th"),
+    (date(2026, 11, 30), date(2026, 12, 5),  "end of month"),
+    (date(2026, 12, 31), date(2027, 1, 5),   "crosses the year"),
+    (date(2026, 1, 31),  date(2026, 2, 5),   "into a short month"),
+    (date(2026, 2, 28),  date(2026, 3, 5),   "out of February"),
+]:
+    actual = _payment_run_date(downloaded)
+    check(f"downloaded {downloaded} ({why})", actual, expected)
+
+print("\nTDS on the payment sheet - deducted on the value excluding GST")
+from verification_router import _tds_for, _taxable_value  # noqa: E402
+
+# Gopikanna, invoice 2757: subtotal 313500 + IGST 56430 = 369930.
+WITH_GST = {"subtotal": 313500, "igst": 56430, "tax_total": 56430, "total_amount": 369930}
+
+check("TDS is 10% of the subtotal, not the total",
+      _tds_for({}, WITH_GST, {"tds_rate": 0.1}, 369930.0)[0], 31350.0)
+check("taxable value comes off the subtotal",
+      _taxable_value(WITH_GST, 369930.0), (313500.0, "subtotal"))
+check("falls back to total less tax_total",
+      _taxable_value({"tax_total": 56430}, 369930.0), (313500.0, "total less tax"))
+check("falls back to total less the GST components",
+      _taxable_value({"cgst": 4680, "sgst": 4680}, 61360.0), (52000.0, "total less GST components"))
+check("no tax on the invoice means the total is the taxable value",
+      _taxable_value({}, 50000.0), (50000.0, "assumed no GST"))
+check("and that basis is reported, not hidden",
+      _tds_for({}, {}, {"tds_rate": 0.1}, 50000.0)[1], "assumed no GST")
+
+check("no rate on the vendor deducts nothing",
+      _tds_for({}, WITH_GST, {}, 369930.0)[0], 0.0)
+check("no vendor at all deducts nothing",
+      _tds_for({}, WITH_GST, None, 369930.0)[0], 0.0)
+check("a rate of zero deducts nothing",
+      _tds_for({}, WITH_GST, {"tds_rate": 0}, 369930.0)[0], 0.0)
+check("a junk rate deducts nothing rather than throwing",
+      _tds_for({}, WITH_GST, {"tds_rate": "abc"}, 369930.0)[0], 0.0)
+check("no amount deducts nothing",
+      _tds_for({}, WITH_GST, {"tds_rate": 0.1}, None)[0], 0.0)
+check("2% rounds to the rupee",
+      _tds_for({}, {"subtotal": 10163.34}, {"tds_rate": 0.02}, 10163.34)[0], 203.0)
+
+print("\nReading TDS rates from the master sheet")
+from sync_vendor_tds import parse_rate  # noqa: E402
+
+check("blank is zero", parse_rate(None), (0.0, None))
+check("empty string is zero", parse_rate(""), (0.0, None))
+check("a dash is zero", parse_rate("-"), (0.0, None))
+check("0.1 stays 0.1", parse_rate(0.1), (0.1, None))
+check("10 means 10 per cent", parse_rate(10), (0.1, None))
+check("'10%' means 10 per cent", parse_rate("10%"), (0.1, None))
+check("2 means 2 per cent", parse_rate(2), (0.02, None))
+check("text is a problem, not a zero", parse_rate("abc")[0], None)
+check("negative is a problem", parse_rate(-1)[0], None)
+check("80 is not a TDS rate", parse_rate(80)[0], None)
+check("1 is ambiguous and refused", parse_rate(1)[0], None)
+
 print("\n" + "=" * 58)
 if failures:
     print(f"{len(failures)} FAILED: {failures}")

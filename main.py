@@ -1,5 +1,6 @@
 from fastapi import FastAPI, HTTPException, status
 from typing import List, Dict, Any
+import asyncio
 import logging
 
 from config import settings
@@ -33,7 +34,10 @@ os.makedirs(upload_dir, exist_ok=True)
 logger.info(f"Using upload directory: {upload_dir}")
 app.mount("/uploads", StaticFiles(directory=upload_dir), name="uploads")
 
-from verification_router import router as verification_router, ensure_indexes
+from verification_router import (
+    router as verification_router, ensure_indexes, run_payment_scheduler,
+    settle_due_payments,
+)
 app.include_router(verification_router)
 
 @app.on_event("startup")
@@ -43,6 +47,16 @@ async def startup_event():
     logger.info("Starting up FastAPI application for Zoho Books integration.")
     # Idempotent - Mongo ignores an index that already exists.
     await ensure_indexes()
+
+    # Catch up before the loop starts its first sleep. A payment scheduled for
+    # a time the server was down must settle as soon as it comes back, not up
+    # to five minutes later.
+    try:
+        await settle_due_payments()
+    except Exception as e:
+        logger.error("Could not settle scheduled payments on startup: %s", e)
+
+    asyncio.create_task(run_payment_scheduler())
 
 @app.get("/vendors", response_model=List[Dict[str, Any]])
 async def list_vendors(page: int = 1, per_page: int = 200):

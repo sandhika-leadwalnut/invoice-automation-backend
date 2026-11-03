@@ -1,11 +1,61 @@
 import httpx
 import logging
+import re
+from datetime import datetime
 from typing import Dict, Any, List, Optional
 from config import settings
 from token_service import token_service
 from schemas import IncomingBillPayload
 
 logger = logging.getLogger(__name__)
+
+# Zoho Books wants a plain yyyy-MM-dd. Anything else comes back as
+# "Invalid value passed for Invoice Date", which reads like a problem with the
+# date itself rather than with its format.
+#
+# The values reaching here are not consistent: extraction produces a string,
+# while an invoice whose date was corrected carries a datetime, which arrives
+# as "2026-10-09T00:00:00". Normalise rather than trusting the caller - this is
+# the last point before the money is booked.
+_ISO_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+_DATE_FORMATS = (
+    "%Y-%m-%d", "%d-%m-%Y", "%d/%m/%Y", "%Y/%m/%d",
+    "%d-%b-%Y", "%d %b %Y", "%d.%m.%Y",
+)
+
+
+def _norm_gstin(value: Any) -> str:
+    """Compare GSTINs ignoring case and spacing."""
+    return re.sub(r"[^A-Z0-9]", "", str(value or "").upper())
+
+
+def as_zoho_date(value: Any) -> Any:
+    """yyyy-MM-dd for Zoho, or the value untouched if it cannot be read."""
+    if value is None:
+        return value
+    if isinstance(value, datetime):
+        return value.date().isoformat()
+
+    text = str(value).strip()
+    if _ISO_DATE.match(text):
+        return text
+
+    # "2026-10-09T00:00:00" and "2026-10-09 00:00:00" - the date is the front.
+    head = re.split(r"[T ]", text, 1)[0]
+    if _ISO_DATE.match(head):
+        return head
+
+    for fmt in _DATE_FORMATS:
+        try:
+            return datetime.strptime(text, fmt).date().isoformat()
+        except ValueError:
+            continue
+
+    # Unrecognised: pass it through and let Zoho reject it. Guessing a date on
+    # a bill is worse than a clear failure.
+    logger.warning("Could not normalise %r into a date for Zoho", value)
+    return value
 
 class ZohoBooksClient:
     def __init__(self):
@@ -140,6 +190,23 @@ class ZohoBooksClient:
         if bill_request.zoho_contact_id:
             vendor_id = bill_request.zoho_contact_id
         elif bill_request.vendor_gstin:
+            # Never look a vendor up by OUR OWN GSTIN. Extraction reads the
+            # buyer's GSTIN into vendor_gstin often enough, and any Zoho contact
+            # that happens to carry it then swallows the bill. That is exactly
+            # how an INNOVATECTURE rental was booked against "Royal Lotus View",
+            # a contact registered under BizBoost's own GSTIN.
+            #
+            # verification_router guards its own matching this way, but this
+            # lookup is a separate path and was not covered. Fail loudly:
+            # booking against whichever contact holds the number is worse than
+            # not booking at all, because the books end up wrong and nobody is
+            # told.
+            if _norm_gstin(bill_request.vendor_gstin) == _norm_gstin(settings.company_gstin):
+                raise Exception(
+                    "This invoice carries our own GSTIN as the vendor's, so the "
+                    "vendor cannot be identified from it. Set the correct vendor "
+                    "in the portal, then accept it again."
+                )
             vendor = await self.get_vendor_by_gstin(bill_request.vendor_gstin)
             if not vendor:
                 raise Exception(f"No vendor found with GSTIN: {bill_request.vendor_gstin}")
@@ -190,7 +257,7 @@ class ZohoBooksClient:
             
         payload = {
             "vendor_id": vendor_id,
-            "date": bill_request.invoice_date,
+            "date": as_zoho_date(bill_request.invoice_date),
             "bill_number": bill_request.invoice_number,
             "line_items": line_items,
         }

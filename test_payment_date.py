@@ -148,6 +148,36 @@ check("no amount deducts nothing",
 check("2% rounds to the rupee",
       _tds_for({}, {"subtotal": 10163.34}, {"tds_rate": 0.02}, 10163.34)[0], 203.0)
 
+print("\nTDS the vendor has already deducted on the invoice")
+# Prodbrew bills the net: 420000 + 75600 GST - 8400 TDS = 487200. Deducting
+# again would pay them 478800 and short-change them by the full amount.
+PRODBREW_1002 = {"invoice_number": "PF-2026-OCT-1002", "subtotal": 420000,
+                 "igst": 75600, "tax_total": 75600, "total_amount": 487200}
+PRODBREW_1001 = {"invoice_number": "PF-2026-OCT-1001", "subtotal": 230000,
+                 "igst": 41400, "tax_total": 41400, "total_amount": 266800}
+
+check("1002 deducts nothing further",
+      _tds_for({}, PRODBREW_1002, {"tds_rate": 0.02}, 487200.0)[0], 0.0)
+check("and says why", _tds_for({}, PRODBREW_1002, {"tds_rate": 0.02}, 487200.0)[1],
+      "already deducted on the invoice")
+check("1001 deducts nothing further",
+      _tds_for({}, PRODBREW_1001, {"tds_rate": 0.02}, 266800.0)[0], 0.0)
+
+# Xperforce bills the gross: 225000 + 40500 = 265500, nothing withheld, so the
+# 10% still has to come off.
+XPERFORCE = {"invoice_number": "2026-27/D-06", "subtotal": 225000,
+             "cgst": 20250, "sgst": 20250, "igst": 40500,
+             "tax_total": 40500, "total_amount": 265500}
+check("a gross invoice still has TDS deducted",
+      _tds_for({}, XPERFORCE, {"tds_rate": 0.1}, 265500.0)[0], 22500.0)
+
+# A discount also makes the total smaller than subtotal + tax. It must not be
+# mistaken for TDS: Innovatecture's rental takes 10% off, nothing like 2%.
+DISCOUNTED = {"subtotal": 187000, "cgst": 16830, "sgst": 16830,
+              "tax_total": 33660, "total_amount": 201960}
+check("a discount is not mistaken for TDS",
+      _tds_for({}, DISCOUNTED, {"tds_rate": 0.02}, 201960.0)[0], 3740.0)
+
 print("\nReading TDS rates from the master sheet")
 from sync_vendor_tds import parse_rate  # noqa: E402
 

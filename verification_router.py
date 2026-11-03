@@ -869,10 +869,21 @@ async def ingest_invoice(payload: Dict[str, Any], response: Response):
     # Prefer what ingestion sent, and fall back for any caller that omits it.
     file_sha256 = payload.pop("source_sha256", None) or _file_sha256(base64_pdf)
 
-    # Map items_table to line_items if Unstract populated items_table instead
-    if "items_table" in payload and isinstance(payload["items_table"], list) and len(payload["items_table"]) > 0:
-        if not payload.get("line_items") or len(payload.get("line_items", [])) == 0:
-            payload["line_items"] = payload.pop("items_table")
+    # items_table is Unstract's own name for the line-item table. The ingestion
+    # service maps it and deletes it; the n8n workflow posts the raw output and
+    # does not, so the same invoice could be stored in two different shapes
+    # depending on which path it arrived by - and a reviewer sees a field on
+    # some invoices and not others with no way to know why.
+    #
+    # Settle it here, where both paths meet: map it when it has rows, and drop
+    # it either way. line_items is the only line-item field from this point on.
+    if "items_table" in payload:
+        table = payload.pop("items_table")
+        if isinstance(table, dict):
+            table = table.get("line_items")
+        if isinstance(table, list) and table and not payload.get("line_items"):
+            payload["line_items"] = table
+    payload.setdefault("line_items", [])
 
     if "line_items" in payload and isinstance(payload["line_items"], list):
         for item in payload["line_items"]:
@@ -1368,7 +1379,55 @@ async def invoice_action(id: str, action_payload: Dict[str, Any]):
         if "items_table" in payload_data and isinstance(payload_data["items_table"], list) and len(payload_data["items_table"]) > 0:
             if not payload_data.get("line_items") or len(payload_data.get("line_items", [])) == 0:
                 payload_data["line_items"] = payload_data.pop("items_table")
-                
+
+        # Some invoice layouts defeat extraction entirely and come through with
+        # no line items at all - Sumo's do. Zoho will not accept a bill without
+        # at least one line, so Accept fails with an error about line_items that
+        # says nothing about the real problem, and the invoice cannot be
+        # processed at all. The review form cannot add array entries either, so
+        # there is no way out from the UI.
+        #
+        # Stand in a single line for the invoice value. It is built here rather
+        # than in zoho_client so the vendor's ledger is stamped on it below,
+        # exactly as it would be on an extracted line - otherwise it falls to
+        # DEFAULT_ITEM_ID and the bill is booked to the wrong account.
+        #
+        # Pre-tax, like every other line: the bill total in Zoho is the sum of
+        # its lines, so using the gross here would overstate it.
+        if not payload_data.get("line_items"):
+            basis = _norm_amount(payload_data.get("subtotal"))
+            label = "invoice subtotal"
+            if basis is None:
+                basis = _norm_amount(payload_data.get("total_amount"))
+                label = "invoice total - no subtotal was extracted"
+
+            if basis:
+                number = payload_data.get("invoice_number") or "unknown"
+                payload_data["line_items"] = [{
+                    "description": f"As per invoice {number}",
+                    "quantity": 1,
+                    "unit_price": basis,
+                    "amount": basis,
+                }]
+                logger.warning(
+                    "Invoice %s has no line items; standing in one line for %s (%s). "
+                    "Extraction could not read the table on this layout.",
+                    number, basis, label,
+                )
+            else:
+                # No lines and no amount: there is nothing to bill. Say so
+                # rather than letting Zoho reject it with a message about
+                # line_items that explains nothing.
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "This invoice has no line items and no amount, so there "
+                        "is nothing to send to Zoho. Check the extracted data "
+                        "against the PDF."
+                    ),
+                )
+
+
         if "line_items" in payload_data and isinstance(payload_data["line_items"], list):
             for item in payload_data["line_items"]:
                 qty = item.get("quantity")
@@ -1613,6 +1672,17 @@ def _taxable_value(data: Dict[str, Any], total: Optional[float]):
     return total, "assumed no GST"
 
 
+def _invoice_tax(data: Dict[str, Any]) -> Optional[float]:
+    """Total tax on the invoice, from whichever field carries it."""
+    for field in TAX_TOTAL_FIELDS:
+        value = _norm_amount(data.get(field))
+        if value:
+            return value
+    parts = [_norm_amount(data.get(f)) for f in TAX_COMPONENT_FIELDS]
+    tax = sum(p for p in parts if p)
+    return tax or None
+
+
 def _tds_for(invoice: Dict[str, Any], data: Dict[str, Any],
              vendor: Optional[Dict[str, Any]], total: Optional[float]):
     """
@@ -1633,7 +1703,29 @@ def _tds_for(invoice: Dict[str, Any], data: Dict[str, Any],
 
     # Rounded to the rupee, which is how TDS is deposited and how the
     # certificate will read.
-    return float(round(taxable * rate)), basis
+    tds = float(round(taxable * rate))
+
+    # Some vendors deduct the TDS themselves and bill the net: Prodbrew's
+    # invoices read 420000 + 75600 GST - 8400 TDS = 487200. Deducting again
+    # pays them 478800 and short-changes them by the whole amount.
+    #
+    # The signal is arithmetic, not a setting: when subtotal plus tax exceeds
+    # the total by almost exactly the TDS we would charge, the invoice has
+    # already taken it off. A discount also makes the total smaller, which is
+    # why the gap has to MATCH the TDS rather than merely exist - a 10% rebate
+    # looks nothing like a 2% deduction.
+    tax = _invoice_tax(data)
+    subtotal = _norm_amount(data.get("subtotal"))
+    if tds and subtotal and tax:
+        shortfall = round(subtotal + tax - total, 2)
+        if abs(shortfall - tds) <= 2:
+            logger.info(
+                "Invoice %s already has TDS of %s deducted on it; not deducting again",
+                data.get("invoice_number") or invoice.get("invoice_number"), tds,
+            )
+            return 0.0, "already deducted on the invoice"
+
+    return tds, basis
 
 
 def _payment_sheet_row(

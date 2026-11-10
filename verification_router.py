@@ -35,6 +35,10 @@ invoices_col = db["invoices"]
 email_metrics_col = db["invoice_email_metrics"]
 zoho_push_metrics_col = db["zoho_push_metrics"]
 duplicate_metrics_col = db["duplicate_metrics"]
+# Documents that reached the mailbox but are not invoices. Deliberately NOT in
+# the invoices collection: nothing here should appear on the dashboard, in the
+# metrics or on a payment sheet.
+skipped_col = db["skipped_documents"]
 
 
 # --- Duplicate detection ----------------------------------------------------
@@ -742,6 +746,88 @@ async def run_payment_scheduler():
         await asyncio.sleep(PAYMENT_SETTLE_INTERVAL_SECONDS)
 
 
+# --- Is this actually an invoice? ------------------------------------------
+#
+# The mailbox receives more than invoices. Link-building reports, for one:
+# "Fortinet June Cycle 2 Sponsored Posts" is nine pages of backlinks with an
+# invoice number of "NA", no amount and no GSTIN. Extraction dutifully produces
+# a record and it lands in the review queue looking like work.
+#
+# The test cannot be "has no invoice number". A real Gopikanna invoice came
+# through with none extracted, and rejecting on that alone would have dropped a
+# bill that was genuinely owed. Two things have to be missing before a document
+# is called something other than an invoice.
+INVOICE_NUMBER_PLACEHOLDERS = {
+    "NA", "N/A", "NIL", "NONE", "NOTAPPLICABLE", "-", "--", "TBD", "XXX", "NULL",
+}
+
+
+def _has_invoice_number(payload: Dict[str, Any]) -> bool:
+    """A real invoice number, not a placeholder standing in for one."""
+    # Stripped of punctuation, so "N/A" and "N.A." are the same thing - and so
+    # that "-" becomes empty rather than passing as a number made of one dash.
+    number = re.sub(r"[^A-Z0-9]", "", _norm_text(payload.get("invoice_number")))
+    if not number:
+        return False
+    return number not in INVOICE_NUMBER_PLACEHOLDERS
+
+
+def _has_amount(payload: Dict[str, Any]) -> bool:
+    for field in ("total_amount", "subtotal", "tax_total"):
+        if _norm_amount(payload.get(field)):
+            return True
+    return any(_norm_amount(i.get("amount")) for i in (payload.get("line_items") or [])
+               if isinstance(i, dict))
+
+
+def _looks_like_an_invoice(payload: Dict[str, Any]):
+    """
+    (is_invoice, reason). Rejects only when a document has neither a usable
+    invoice number nor any monetary amount anywhere - no total, no subtotal,
+    no tax, no line amount.
+
+    Both have to be absent. An invoice with an amount but no readable number is
+    still an invoice; so is one with a number whose amount extraction missed.
+    Something with neither cannot be paid or booked, and is almost certainly
+    not a bill at all.
+    """
+    if _has_amount(payload):
+        return True, None
+    if _has_invoice_number(payload):
+        return True, None
+
+    number = payload.get("invoice_number")
+    detail = f"invoice number {number!r}" if number else "no invoice number"
+    return False, f"no amount anywhere, and {detail}"
+
+
+async def _record_skipped_document(payload: Dict[str, Any], reason: str,
+                                   pdf_filename: Optional[str],
+                                   gmail_message_id: Optional[str]):
+    """
+    Keep what was skipped, outside the invoices collection.
+
+    Nothing here reaches the dashboard, the metrics or a payment sheet. It
+    exists so that a genuine invoice wrongly judged can be found and put back -
+    and so the gap between "received by mail" and the number of invoices stays
+    explainable rather than becoming another number nobody can account for.
+
+        db.skipped_documents.find({})
+    """
+    await skipped_col.insert_one({
+        "reason": reason,
+        "pdf_filename": payload.get("pdf_filename") or pdf_filename,
+        "drive_file_id": payload.get("drive_file_id"),
+        "gmail_message_id": gmail_message_id,
+        "vendor_name": payload.get("vendor_name"),
+        "invoice_number": payload.get("invoice_number"),
+        # The whole extraction, so a wrongly skipped invoice can be recovered
+        # without going back to the PDF.
+        "extracted": payload,
+        "created_at": datetime.utcnow(),
+    })
+
+
 async def ensure_indexes():
     """Indexes backing the duplicate lookups. Safe to call on every startup."""
     try:
@@ -901,6 +987,25 @@ async def ingest_invoice(payload: Dict[str, Any], response: Response):
                     item["unit_price"] = float(amount) / float(item["quantity"])
             except (ValueError, TypeError, ZeroDivisionError):
                 pass
+
+    # Not everything in the mailbox is an invoice. A link-building report is
+    # not a bill, and putting one in the queue means someone reads nine pages
+    # of backlinks before working that out.
+    #
+    # No invoice record is created, so it is absent from the dashboard, the
+    # metrics and the payment sheet entirely. It is NOT thrown away though:
+    # the extraction is kept in skipped_documents, because the same test would
+    # catch a genuine invoice that extraction mangled, and a bill that vanishes
+    # with no trace is the one failure this system must not have.
+    is_invoice, why_not = _looks_like_an_invoice(payload)
+    if not is_invoice:
+        await _record_skipped_document(payload, why_not, pdf_filename, gmail_message_id)
+        logger.info(
+            "Not an invoice, skipped: %r - %s",
+            payload.get("pdf_filename") or pdf_filename or invoice_id, why_not,
+        )
+        response.status_code = status.HTTP_200_OK
+        return {"status": "not_an_invoice", "reason": why_not}
 
     # Catch a day/month swap before anything is derived from the date - the due
     # date, the financial year in the dedupe key and the payment sheet all read
@@ -1137,6 +1242,15 @@ async def get_metrics(
     duplicate_metrics_res = await duplicate_metrics_col.aggregate(duplicate_pipeline).to_list(None)
     total_duplicates_blocked = duplicate_metrics_res[0]["total"] if duplicate_metrics_res else 0
 
+    # Documents that were not invoices. Counted but not shown as invoices
+    # anywhere, so that received_by_mail still reconciles as
+    # records + duplicates + not-invoices + failures, instead of leaving a gap
+    # nobody can account for.
+    skipped_query: Dict[str, Any] = {}
+    if "created_at" in query:
+        skipped_query["created_at"] = query["created_at"]
+    total_not_invoices = await skipped_col.count_documents(skipped_query)
+
     # --- Money actually paid -------------------------------------------------
     #
     # Filtered on paid_at, NOT created_at: "what did we pay in September" means
@@ -1211,6 +1325,9 @@ async def get_metrics(
         "total_email_invoices": total_email_invoices,
         "total_zoho_pushed": total_zoho_pushed,
         "total_duplicates_blocked": total_duplicates_blocked,
+        # Available for reconciliation; no tile shows it. These were never
+        # invoices, so they are not part of any processing figure.
+        "total_not_invoices": total_not_invoices,
         # Invoice value, inclusive of GST. This is what was billed and approved,
         # not the cash that left the bank - TDS is deducted at payment and is
         # not tracked in this service, so the two differ by the withheld amount.

@@ -1214,7 +1214,16 @@ async def get_metrics(
     ]
     status_counts = await invoices_col.aggregate(pipeline).to_list(None)
 
+    # Processed counts everything that came through, deletions included: it is
+    # a fact about the past, and a count that drops when someone tidies up
+    # leaves an unexplained gap against Received.
     total_processed = sum(item["count"] for item in status_counts)
+
+    # The chart is about the queue, not the history, so deleted invoices are
+    # left out of it. The slices therefore add up to slightly less than
+    # Processed whenever something has been deleted, which is deliberate.
+    total_deleted = sum(i["count"] for i in status_counts if i["_id"] == "deleted")
+    status_counts = [i for i in status_counts if i["_id"] != "deleted"]
     
     vendor_pipeline = [
         {"$match": query},
@@ -1369,6 +1378,9 @@ async def get_metrics(
         # Available for reconciliation; no tile shows it. These were never
         # invoices, so they are not part of any processing figure.
         "total_not_invoices": total_not_invoices,
+        # Included in "total" but kept out of the chart. Exposed so the two can
+        # be reconciled without anyone having to guess at the difference.
+        "total_deleted": total_deleted,
         # Invoice value, inclusive of GST. This is what was billed and approved,
         # not the cash that left the bank - TDS is deducted at payment and is
         # not tracked in this service, so the two differ by the withheld amount.

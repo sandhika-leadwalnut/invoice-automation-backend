@@ -276,7 +276,27 @@ async def _find_duplicate(
     return None, None
 
 
-async def _record_duplicate_hit(original: Dict[str, Any], reason: str, pdf_filename: Optional[str]):
+def _arrival_source(gmail_message_id: Optional[str], drive_file_id: Optional[str]) -> str:
+    """
+    How a document reached the backend.
+
+    "direct" means neither id was present, so nothing polled it - it was posted
+    straight to the API by Swagger or a script. Those never increment the
+    received counter, which is precisely why they are worth labelling: an
+    outcome with no matching Received row is otherwise invisible.
+    """
+    if gmail_message_id:
+        return "gmail"
+    if drive_file_id:
+        return "drive"
+    return "direct"
+
+
+async def _record_duplicate_hit(original: Dict[str, Any], reason: str,
+                                pdf_filename: Optional[str],
+                                source: Optional[str] = None,
+                                gmail_message_id: Optional[str] = None,
+                                drive_file_id: Optional[str] = None):
     """
     Note a dropped duplicate against the invoice it duplicates, and add to the
     running total.
@@ -285,6 +305,11 @@ async def _record_duplicate_hit(original: Dict[str, Any], reason: str, pdf_filen
     of records, so the count is kept separately - otherwise a dropped duplicate
     becomes indistinguishable from a failed extraction, and those need very
     different responses.
+
+    source says where it came in from. Without it a duplicate blocked by the
+    poller and one posted by hand look identical, and telling them apart meant
+    lining up timestamps between three collections - which is exactly what
+    reconciling November turned into.
     """
     now = datetime.utcnow()
     await invoices_col.update_one(
@@ -305,6 +330,13 @@ async def _record_duplicate_hit(original: Dict[str, Any], reason: str, pdf_filen
         "total_blocked": 1,
         "reason": reason,
         "original_id": original["_id"],
+        "pdf_filename": pdf_filename,
+        # "gmail", "drive", or "direct" when neither id is present - which
+        # means something posted to the API without the poller counting it,
+        # and so without it appearing in Received.
+        "source": source,
+        "gmail_message_id": gmail_message_id,
+        "drive_file_id": drive_file_id,
         "created_at": now,
     })
 
@@ -828,6 +860,7 @@ async def _record_skipped_document(payload: Dict[str, Any], reason: str,
         "pdf_filename": payload.get("pdf_filename") or pdf_filename,
         "drive_file_id": payload.get("drive_file_id"),
         "gmail_message_id": gmail_message_id,
+        "source": _arrival_source(gmail_message_id, payload.get("drive_file_id")),
         "vendor_name": payload.get("vendor_name"),
         "invoice_number": payload.get("invoice_number"),
         # The whole extraction, so a wrongly skipped invoice can be recovered
@@ -1066,7 +1099,12 @@ async def ingest_invoice(payload: Dict[str, Any], response: Response):
     if original is not None and reason in CERTAIN_DUPLICATE_REASONS:
         # Never should have been picked up in the first place. No record, no PDF
         # written - just a note against the original so the count is traceable.
-        await _record_duplicate_hit(original, reason, pdf_filename)
+        await _record_duplicate_hit(
+            original, reason, pdf_filename,
+            source=_arrival_source(gmail_message_id, drive_file_id),
+            gmail_message_id=gmail_message_id,
+            drive_file_id=drive_file_id,
+        )
         logger.info(
             f"Dropped duplicate ({reason}) of invoice {original['_id']} "
             f"- file {pdf_filename}"

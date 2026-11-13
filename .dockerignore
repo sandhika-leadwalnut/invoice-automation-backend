@@ -52,6 +52,8 @@ list_zoho.py
 suggest_vendor_aliases.py
 diagnose_payment_sheet.py
 explain_sheet_amount.py
+reconcile_metrics.py
+purge_test_data.py
 update_vendors.py
 recheck_bank_details.py
 fix_objectid_fields.py

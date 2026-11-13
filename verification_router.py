@@ -1166,8 +1166,19 @@ async def get_metrics(
     vendor_name: Optional[str] = Query(None)
 ):
     """Retrieve metrics for the dashboard."""
-    # Soft-deleted invoices are excluded from every figure on the dashboard.
-    query = dict(NOT_DELETED)
+    # Deleted invoices are COUNTED here, unlike on the dashboard list.
+    #
+    # Processed answers "how many invoices did this system handle", which is a
+    # fact about the past. Deleting one afterwards does not unhandle it, and
+    # when the count dropped, the difference from Received had no explanation -
+    # the same unaccountable gap that took three attempts to untangle in
+    # October. Received has always worked this way; Processed now matches.
+    #
+    # They are not hidden: a deleted invoice is grouped as its own status
+    # below, so the donut still adds up to Processed and says what became of
+    # each one. Money figures further down stay on live records - a deleted
+    # invoice is not money that left the bank.
+    query: Dict[str, Any] = {}
 
     if start_date or end_date:
         date_query = {}
@@ -1187,15 +1198,22 @@ async def get_metrics(
     if vendor_name:
         query["vendor_name"] = vendor_name
         
+    # A deleted invoice is reported as "deleted" rather than under whatever it
+    # was when it was removed. Its old status is no longer true of it, and
+    # leaving it in the pending slice would overstate the queue.
+    status_expr = {
+        "$cond": [{"$ifNull": ["$deleted_at", False]}, "deleted", "$status"]
+    }
+
     pipeline = [
         {"$match": query},
         {"$group": {
-            "_id": "$status",
+            "_id": status_expr,
             "count": {"$sum": 1}
         }}
     ]
     status_counts = await invoices_col.aggregate(pipeline).to_list(None)
-    
+
     total_processed = sum(item["count"] for item in status_counts)
     
     vendor_pipeline = [

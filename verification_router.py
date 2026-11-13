@@ -40,6 +40,15 @@ duplicate_metrics_col = db["duplicate_metrics"]
 # metrics or on a payment sheet.
 skipped_col = db["skipped_documents"]
 
+# Every Drive file this service has handled, whatever the outcome - ingested,
+# blocked as a duplicate, or judged not an invoice. The Drive poller asks this
+# before downloading anything, because a file it would only reject still costs
+# an Unstract call and still counts as received.
+#
+# Kept here rather than in the poller: the poller runs in a container that gets
+# replaced, and a list that lives there starts empty every time it does.
+seen_drive_col = db["seen_drive_files"]
+
 
 # --- Duplicate detection ----------------------------------------------------
 #
@@ -942,6 +951,20 @@ async def ingest_invoice(payload: Dict[str, Any], response: Response):
     base64_pdf = payload.pop("base64_pdf", None)
     pdf_filename = payload.pop("pdf_filename", f"{invoice_id}.pdf")
     gmail_message_id = payload.pop("gmail_message_id", None)
+
+    # Record the Drive file before deciding anything about it. Every outcome
+    # counts as handled - ingested, duplicate, not an invoice - because the
+    # poller's question is "should I spend an Unstract call on this again",
+    # and for all three the answer is no.
+    drive_file_id = payload.get("drive_file_id")
+    if drive_file_id:
+        await seen_drive_col.update_one(
+            {"_id": drive_file_id},
+            {"$set": {"last_seen_at": datetime.utcnow(),
+                      "pdf_filename": payload.get("pdf_filename")},
+             "$setOnInsert": {"first_seen_at": datetime.utcnow()}},
+            upsert=True,
+        )
     pdf_url = None
 
     # Fingerprint the file before anything else. This is the one check that does
@@ -2201,6 +2224,28 @@ async def cancel_scheduled_payment(payload: Dict[str, Any]):
          "$set": {"updated_at": datetime.utcnow()}},
     )
     return {"status": "cancelled", "cancelled": result.modified_count}
+
+
+@router.get("/drive-files/seen")
+async def seen_drive_files(ids: str = Query(..., description="comma-separated Drive file ids")):
+    """
+    Which of these Drive files this service has already handled.
+
+    Asked by the Drive poller before it downloads anything. A file that would
+    only be rejected as a duplicate still costs an Unstract call and still
+    inflates the received count, so the cheap question comes first.
+
+    "Handled" covers every outcome, including rejected and not-an-invoice: in
+    all of them, parsing it again changes nothing.
+    """
+    wanted = [i.strip() for i in ids.split(",") if i.strip()]
+    if not wanted:
+        return {"seen": []}
+
+    found = await seen_drive_col.find(
+        {"_id": {"$in": wanted}}, {"_id": 1}
+    ).to_list(length=len(wanted))
+    return {"seen": [doc["_id"] for doc in found]}
 
 
 @router.get("/invoices/scheduled-payments")
